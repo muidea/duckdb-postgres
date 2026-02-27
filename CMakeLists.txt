@@ -4,8 +4,9 @@ project(${TARGET_NAME})
 
 add_definitions(-DFRONTEND=1 -D_GNU_SOURCE=1)
 add_definitions(-DUSE_OPENSSL=1 -DHAVE_BIO_GET_DATA=1 -DHAVE_BIO_METH_NEW=1)
-set(OPENSSL_USE_STATIC_LIBS TRUE)
 
+set(OPENSSL_ROOT_DIR /usr/lib/x86_64-linux-gnu)
+set(OPENSSL_USE_STATIC_LIBS FALSE)
 find_package(OpenSSL REQUIRED)
 
 if(NOT MSVC)

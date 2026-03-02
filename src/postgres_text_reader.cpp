@@ -1,6 +1,7 @@
 #include "postgres_text_reader.hpp"
 #include "postgres_scanner.hpp"
 #include "duckdb/common/types/blob.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
@@ -14,8 +15,37 @@ PostgresTextReader::~PostgresTextReader() {
 }
 
 void PostgresTextReader::BeginCopy(const string &sql) {
-	result = con.Query(sql);
+	string base_sql = sql;
+	StringUtil::RTrim(base_sql);
+	while (!base_sql.empty() && base_sql.back() == ';') {
+		base_sql.pop_back();
+		StringUtil::RTrim(base_sql);
+	}
+
+	cursor_name = "\"__duckdb_cursor_" + UUID::ToString(UUID::GenerateRandomUUID()) + "\"";
+	auto try_result = con.TryQuery("DECLARE " + cursor_name + " CURSOR FOR " + base_sql);
+	if (try_result) {
+		use_cursor = true;
+		cursor_open = true;
+		FetchNextBatch();
+	} else {
+		use_cursor = false;
+		cursor_open = false;
+		result = con.Query(sql);
+		row_offset = 0;
+	}
+}
+
+void PostgresTextReader::FetchNextBatch() {
+	result = con.Query("FETCH " + to_string(CURSOR_FETCH_SIZE) + " FROM " + cursor_name);
 	row_offset = 0;
+}
+
+void PostgresTextReader::CloseCursor() {
+	if (cursor_open) {
+		cursor_open = false;
+		con.TryQuery("CLOSE " + cursor_name);
+	}
 }
 
 struct PostgresListParser {
@@ -331,7 +361,6 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 		return PostgresReadResult::FINISHED;
 	}
 	if (scan_chunk.data.empty()) {
-		// initialize the scan chunk
 		vector<LogicalType> types;
 		for (idx_t i = 0; i < output.ColumnCount(); i++) {
 			types.push_back(LogicalType::VARCHAR);
@@ -339,21 +368,36 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 		scan_chunk.Initialize(context, types);
 	}
 	scan_chunk.Reset();
-	for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count(); row_offset++) {
-		idx_t output_offset = scan_chunk.size();
-		for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
-			auto col_idx = column_ids[output_idx];
-			auto &out_vec = scan_chunk.data[output_idx];
-			if (result->IsNull(row_offset, output_idx)) {
-				FlatVector::SetNull(out_vec, output_offset, true);
-				continue;
+	while (scan_chunk.size() < STANDARD_VECTOR_SIZE) {
+		if (row_offset >= result->Count()) {
+			if (use_cursor) {
+				result.reset();
+				FetchNextBatch();
+				if (result->Count() == 0) {
+					CloseCursor();
+					break;
+				}
+			} else {
+				break;
 			}
-			auto col_data = FlatVector::GetData<string_t>(out_vec);
-			col_data[output_offset] =
-			    StringVector::AddStringOrBlob(out_vec, result->GetStringRef(row_offset, output_idx));
 		}
-		scan_chunk.SetCardinality(scan_chunk.size() + 1);
+		for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count(); row_offset++) {
+			idx_t output_offset = scan_chunk.size();
+			for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
+				auto col_idx = column_ids[output_idx];
+				auto &out_vec = scan_chunk.data[output_idx];
+				if (result->IsNull(row_offset, output_idx)) {
+					FlatVector::SetNull(out_vec, output_offset, true);
+					continue;
+				}
+				auto col_data = FlatVector::GetData<string_t>(out_vec);
+				col_data[output_offset] =
+				    StringVector::AddStringOrBlob(out_vec, result->GetStringRef(row_offset, output_idx));
+			}
+			scan_chunk.SetCardinality(scan_chunk.size() + 1);
+		}
 	}
+
 	for (idx_t c = 0; c < output.ColumnCount(); c++) {
 		auto col_idx = column_ids[c];
 		if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
@@ -366,9 +410,7 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 	}
 	output.SetCardinality(scan_chunk.size());
 
-	bool finished = row_offset >= result->Count();
-	if (finished) {
-		// The result set is fully consumed. Reset immediately to free the PGresult.
+	if (scan_chunk.size() == 0) {
 		Reset();
 		return PostgresReadResult::FINISHED;
 	}
@@ -376,6 +418,7 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 }
 
 void PostgresTextReader::Reset() {
+	CloseCursor();
 	result.reset();
 	row_offset = 0;
 }

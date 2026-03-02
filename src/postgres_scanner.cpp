@@ -5,6 +5,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/allocator.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "postgres_filter_pushdown.hpp"
 #include "postgres_scanner.hpp"
@@ -190,7 +191,7 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
 	}
 	bind_data->names = info->postgres_names;
 	bind_data->types = return_types;
-	bind_data->can_use_main_thread = true;
+	bind_data->can_use_main_thread = false;
 	bind_data->requires_materialization = false;
 
 	PostgresScanFunction::PrepareBind(version, context, *bind_data, info->approx_num_pages);
@@ -324,14 +325,14 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
 		result->SetConnection(std::move(con));
 	}
 	if (bind_data.requires_materialization) {
-		// if requires_materialization is enabled we scan and materialize the table in its entirety up-front
 		vector<LogicalType> types;
 		for (auto column_id : input.column_ids) {
 			types.push_back(column_id == COLUMN_IDENTIFIER_ROW_ID ? LogicalType::BIGINT : bind_data.types[column_id]);
 		}
-		auto materialized = make_uniq<ColumnDataCollection>(Allocator::Get(context), types);
+		auto &buffer_allocator = BufferAllocator::Get(context);
+		auto materialized = make_uniq<ColumnDataCollection>(buffer_allocator, types);
 		DataChunk scan_chunk;
-		scan_chunk.Initialize(Allocator::Get(context), types);
+		scan_chunk.Initialize(buffer_allocator, types);
 
 		auto local_state = GetLocalState(context, input, *result);
 		auto &lstate = local_state->Cast<PostgresLocalState>();
@@ -380,6 +381,7 @@ bool PostgresGlobalState::TryOpenNewConnection(ClientContext &context, PostgresL
                                                const PostgresBindData &bind_data) {
 	auto pg_catalog = bind_data.GetCatalog();
 	{
+		/*
 		lock_guard<mutex> parallel_lock(lock);
 		if (!used_main_thread) {
 			if (bind_data.can_use_main_thread) {
@@ -393,6 +395,7 @@ bool PostgresGlobalState::TryOpenNewConnection(ClientContext &context, PostgresL
 			used_main_thread = true;
 			return true;
 		}
+		*/
 	}
 
 	if (pg_catalog) {

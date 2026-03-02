@@ -15,6 +15,8 @@
 namespace duckdb {
 
 struct PostgresTextReader : public PostgresResultReader {
+	static constexpr idx_t CURSOR_FETCH_SIZE = 10000;
+
 	explicit PostgresTextReader(ClientContext &context, PostgresConnection &con, const vector<column_t> &column_ids,
 	                            const PostgresBindData &bind_data);
 	~PostgresTextReader() override;
@@ -25,6 +27,8 @@ public:
 
 private:
 	void Reset();
+	void CloseCursor();
+	void FetchNextBatch();
 	void ConvertVector(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count);
 	void ConvertList(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count);
 	void ConvertStruct(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count);
@@ -36,6 +40,9 @@ private:
 	DataChunk scan_chunk;
 	unique_ptr<PostgresResult> result;
 	idx_t row_offset = 0;
+	bool use_cursor = false;
+	bool cursor_open = false;
+	string cursor_name;
 };
 
 } // namespace duckdb

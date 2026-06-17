@@ -12,6 +12,8 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/storage/storage_extension.hpp"
 #include "storage/postgres_catalog.hpp"
 #include "storage/postgres_optimizer.hpp"
 #include "duckdb/planner/extension_callback.hpp"
@@ -160,7 +162,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(postgres_secret_function);
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.storage_extensions["postgres_scanner"] = make_uniq<PostgresStorageExtension>();
+	StorageExtension::Register(config, "postgres_scanner", make_shared_ptr<PostgresStorageExtension>());
 
 	config.AddExtensionOption("pg_use_binary_copy", "Whether or not to use BINARY copy to read data",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
@@ -190,9 +192,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	OptimizerExtension postgres_optimizer;
 	postgres_optimizer.optimize_function = PostgresOptimizer::Optimize;
-	config.optimizer_extensions.push_back(std::move(postgres_optimizer));
+	OptimizerExtension::Register(config, std::move(postgres_optimizer));
 
-	config.extension_callbacks.push_back(make_uniq<PostgresExtensionCallback>());
+	ExtensionCallback::Register(config, make_shared_ptr<PostgresExtensionCallback>());
 	for (auto &connection : ConnectionManager::Get(loader.GetDatabaseInstance()).GetConnectionList()) {
 		connection->registered_state->Insert("postgres_extension", make_shared_ptr<PostgresExtensionState>());
 	}

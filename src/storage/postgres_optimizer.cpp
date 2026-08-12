@@ -114,23 +114,48 @@ void PostgresOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logi
 	}
 	for (auto &entry : operators.scans) {
 		auto &catalog = entry.first;
-		auto multiple_scans = entry.second.size() > 1;
+		if (entry.second.size() == 1) {
+			auto &bind_data = entry.second[0].get().bind_data->Cast<PostgresBindData>();
+			// A single scan can stream through the transaction connection.
+			bind_data.requires_materialization = false;
+			bind_data.can_use_main_thread = true;
+			continue;
+		}
+
+		vector<reference<LogicalGet>> streamable_scans;
 		for (auto &scan : entry.second) {
 			auto &bind_data = scan.get().bind_data->Cast<PostgresBindData>();
-			// if there is a single scan in the plan we can always stream using the main thread
-			// if there is more than one scan we either (1) need to materialize, or (2) cannot use the main thread
-			if (multiple_scans) {
-				if (bind_data.max_threads > 1 && bind_data.read_only) {
-					bind_data.requires_materialization = false;
-					bind_data.can_use_main_thread = false;
-				} else {
-					bind_data.requires_materialization = true;
-					bind_data.can_use_main_thread = true;
-				}
+			if (bind_data.max_threads > 1 && bind_data.read_only) {
+				streamable_scans.push_back(scan);
 			} else {
-				bind_data.requires_materialization = false;
+				bind_data.requires_materialization = true;
 				bind_data.can_use_main_thread = true;
 			}
+		}
+
+		if (streamable_scans.empty()) {
+			continue;
+		}
+
+		// Multi-scan plans cannot share the transaction connection. Reserve that slot for snapshot
+		// coordination and divide the remaining pool capacity across the streaming scan operators.
+		// If there is not one connection per operator, materialize instead of exceeding the configured limit.
+		auto connection_limit = catalog.get().GetConnectionPool().GetMaximumConnections();
+		if (connection_limit <= streamable_scans.size()) {
+			for (auto &scan : streamable_scans) {
+				auto &bind_data = scan.get().bind_data->Cast<PostgresBindData>();
+				bind_data.requires_materialization = true;
+				bind_data.can_use_main_thread = true;
+			}
+			continue;
+		}
+
+		auto max_threads_per_scan = (connection_limit - 1) / streamable_scans.size();
+		for (auto &scan : streamable_scans) {
+			auto &bind_data = scan.get().bind_data->Cast<PostgresBindData>();
+			bind_data.requires_materialization = false;
+			bind_data.can_use_main_thread = false;
+			bind_data.max_threads = MinValue(bind_data.max_threads, max_threads_per_scan);
 		}
 	}
 }

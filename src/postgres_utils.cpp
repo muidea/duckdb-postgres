@@ -11,9 +11,13 @@ static void PGNoticeProcessor(void *arg, const char *message) {
 PGconn *PostgresUtils::PGConnect(const string &dsn) {
 	PGconn *conn = PQconnectdb(dsn.c_str());
 
-	// both PQStatus and PQerrorMessage check for nullptr
+	if (!conn) {
+		throw IOException("Unable to connect to Postgres at %s: PQconnectdb returned no connection", dsn);
+	}
 	if (PQstatus(conn) == CONNECTION_BAD) {
-		throw IOException("Unable to connect to Postgres at %s: %s", dsn, string(PQerrorMessage(conn)));
+		auto error_message = string(PQerrorMessage(conn));
+		PQfinish(conn);
+		throw IOException("Unable to connect to Postgres at %s: %s", dsn, error_message);
 	}
 	PQsetNoticeProcessor(conn, PGNoticeProcessor, nullptr);
 	return conn;

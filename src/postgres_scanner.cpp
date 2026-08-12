@@ -25,7 +25,6 @@ struct PostgresGlobalState;
 struct PostgresLocalState : public LocalTableFunctionState {
 	bool done = false;
 	bool exec = false;
-	bool no_connection = false;
 	string sql;
 	vector<column_t> column_ids;
 	TableFilterSet *filters;
@@ -70,10 +69,20 @@ static void PostgresGetSnapshot(PostgresVersion version, const PostgresBindData 
 	unique_ptr<PostgresResult> result;
 	// by default disable snapshotting
 	gstate.snapshot = string();
-	if (gstate.max_threads <= 1) {
+	if (!bind_data.use_transaction) {
+		return;
+	}
+	// A scan that cannot use the main transaction connection still needs a shared
+	// snapshot, even when its connection budget only allows one local task.
+	if (gstate.max_threads <= 1 && bind_data.can_use_main_thread) {
 		return;
 	}
 	if (version.type_v == PostgresInstanceType::AURORA) {
+		return;
+	}
+	// SET TRANSACTION SNAPSHOT requires REPEATABLE READ or SERIALIZABLE.
+	auto pg_catalog = bind_data.GetCatalog();
+	if (pg_catalog && pg_catalog->isolation_level == PostgresIsolationLevel::READ_COMMITTED) {
 		return;
 	}
 	// reader threads can use the same snapshot
@@ -191,7 +200,7 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
 	}
 	bind_data->names = info->postgres_names;
 	bind_data->types = return_types;
-	bind_data->can_use_main_thread = false;
+	bind_data->can_use_main_thread = true;
 	bind_data->requires_materialization = false;
 
 	PostgresScanFunction::PrepareBind(version, context, *bind_data, info->approx_num_pages);
@@ -294,15 +303,28 @@ static idx_t PostgresMaxThreads(ClientContext &context, const FunctionData *bind
 	if (bind_data.requires_materialization) {
 		return 1;
 	}
-	return bind_data.max_threads;
+	auto max_threads = bind_data.max_threads;
+	if (auto pg_catalog = bind_data.GetCatalog()) {
+		auto connection_limit = pg_catalog->GetConnectionPool().GetMaximumConnections();
+		if (bind_data.can_use_main_thread) {
+			// The first task reuses the transaction connection, and every additional task needs a pool slot.
+			max_threads = MinValue(max_threads, connection_limit);
+		} else if (connection_limit > 1) {
+			// A multi-scan plan reserves the transaction connection for snapshot coordination.
+			max_threads = MinValue(max_threads, connection_limit - 1);
+		}
+	}
+	return max_threads;
 }
 
 static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context, TableFunctionInitInput &input,
                                                          PostgresGlobalState &gstate);
 
-static void PostgresScanConnect(PostgresConnection &conn, string snapshot) {
-	conn.Execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+static void PostgresScanConnect(PostgresConnection &conn, const string &snapshot, AccessMode access_mode,
+                                PostgresIsolationLevel isolation_level) {
+	conn.Execute(PostgresTransaction::GetBeginTransactionQuery(isolation_level, access_mode));
 	if (!snapshot.empty()) {
+		D_ASSERT(isolation_level != PostgresIsolationLevel::READ_COMMITTED);
 		conn.Query(StringUtil::Format("SET TRANSACTION SNAPSHOT '%s'", snapshot));
 	}
 }
@@ -320,7 +342,7 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
 	} else {
 		auto con = PostgresConnection::Open(bind_data.dsn);
 		if (bind_data.use_transaction) {
-			PostgresScanConnect(con, string());
+			PostgresScanConnect(con, string(), AccessMode::READ_ONLY, PostgresIsolationLevel::REPEATABLE_READ);
 		}
 		result->SetConnection(std::move(con));
 	}
@@ -381,32 +403,31 @@ bool PostgresGlobalState::TryOpenNewConnection(ClientContext &context, PostgresL
                                                const PostgresBindData &bind_data) {
 	auto pg_catalog = bind_data.GetCatalog();
 	{
-		/*
 		lock_guard<mutex> parallel_lock(lock);
 		if (!used_main_thread) {
 			if (bind_data.can_use_main_thread) {
 				lstate.connection = PostgresConnection(GetConnection().GetConnection());
-			} else {
-				// we cannot use the main thread but we haven't initiated ANY scan yet
-				// we HAVE to open a new connection
-				lstate.pool_connection = pg_catalog->GetConnectionPool().ForceGetConnection();
-				lstate.connection = PostgresConnection(lstate.pool_connection.GetConnection().GetConnection());
+				used_main_thread = true;
+				return true;
 			}
 			used_main_thread = true;
-			return true;
 		}
-		*/
 	}
 
 	if (pg_catalog) {
-		if (!pg_catalog->GetConnectionPool().TryGetConnection(lstate.pool_connection)) {
-			return false;
-		}
+		// Pool exhaustion is a query failure, never an empty scan result or a limit bypass.
+		lstate.pool_connection = pg_catalog->GetConnectionPool().GetConnection();
 		lstate.connection = PostgresConnection(lstate.pool_connection.GetConnection().GetConnection());
+		if (bind_data.use_transaction) {
+			PostgresScanConnect(lstate.connection, snapshot, pg_catalog->access_mode, pg_catalog->isolation_level);
+		}
 	} else {
 		lstate.connection = PostgresConnection::Open(bind_data.dsn);
+		if (bind_data.use_transaction) {
+			PostgresScanConnect(lstate.connection, snapshot, AccessMode::READ_ONLY,
+			                    PostgresIsolationLevel::REPEATABLE_READ);
+		}
 	}
-	PostgresScanConnect(lstate.connection, snapshot);
 	return true;
 }
 
@@ -421,11 +442,7 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
 	local_state->column_ids = input.column_ids;
 
 	local_state->filters = input.filters.get();
-	if (!gstate.TryOpenNewConnection(context, *local_state, bind_data)) {
-		// if the connection pool is exhausted we bail-out
-		local_state->no_connection = true;
-		return std::move(local_state);
-	}
+	gstate.TryOpenNewConnection(context, *local_state, bind_data);
 	if (bind_data.pages_approx == 0 || bind_data.requires_materialization) {
 		PostgresInitInternal(context, &bind_data, *local_state, 0, POSTGRES_TID_MAX);
 		gstate.page_idx = POSTGRES_TID_MAX;
@@ -480,9 +497,6 @@ static void PostgresScan(ClientContext &context, TableFunctionInput &data, DataC
 		return;
 	}
 	auto &local_state = data.local_state->Cast<PostgresLocalState>();
-	if (local_state.no_connection) {
-		return;
-	}
 	local_state.ScanChunk(context, bind_data, gstate, output);
 }
 

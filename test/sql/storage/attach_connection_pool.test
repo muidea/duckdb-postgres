@@ -52,6 +52,22 @@ SET pg_connection_limit=1000
 statement ok
 SET pg_connection_limit=1
 
+# Multiple scans must materialize through the transaction connection when the
+# configured pool has no spare connection for a streaming join.
+query I
+SELECT COUNT(*) FROM connection_pool a JOIN connection_pool b USING (i)
+----
+1000000
+
+statement ok
+SET pg_connection_limit=3
+
+# Two streaming scans share the two spare slots and import the transaction snapshot.
+query I
+SELECT COUNT(*) FROM connection_pool a JOIN connection_pool b USING (i)
+----
+1000000
+
 statement ok
 SET pg_connection_limit=4
 

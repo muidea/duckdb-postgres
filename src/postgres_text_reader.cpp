@@ -15,6 +15,7 @@ PostgresTextReader::~PostgresTextReader() {
 }
 
 void PostgresTextReader::BeginCopy(const string &sql) {
+	Reset();
 	string base_sql = sql;
 	StringUtil::RTrim(base_sql);
 	while (!base_sql.empty() && base_sql.back() == ';') {
@@ -23,14 +24,19 @@ void PostgresTextReader::BeginCopy(const string &sql) {
 	}
 
 	cursor_name = "\"__duckdb_cursor_" + UUID::ToString(UUID::GenerateRandomUUID()) + "\"";
-	auto try_result = con.TryQuery("DECLARE " + cursor_name + " CURSOR FOR " + base_sql);
+	string cursor_error;
+	auto try_result = con.TryQuery("DECLARE " + cursor_name + " CURSOR FOR " + base_sql, &cursor_error);
 	if (try_result) {
 		use_cursor = true;
 		cursor_open = true;
 		FetchNextBatch();
 	} else {
+		if (PQtransactionStatus(con.GetConn()) != PQTRANS_IDLE) {
+			throw IOException("Failed to declare Postgres cursor: %s", cursor_error);
+		}
 		use_cursor = false;
 		cursor_open = false;
+		cursor_name.clear();
 		result = con.Query(sql);
 		row_offset = 0;
 	}
@@ -42,10 +48,12 @@ void PostgresTextReader::FetchNextBatch() {
 }
 
 void PostgresTextReader::CloseCursor() {
+	use_cursor = false;
 	if (cursor_open) {
 		cursor_open = false;
 		con.TryQuery("CLOSE " + cursor_name);
 	}
+	cursor_name.clear();
 }
 
 struct PostgresListParser {
@@ -410,7 +418,8 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 	}
 	output.SetCardinality(scan_chunk.size());
 
-	if (scan_chunk.size() == 0) {
+	bool finished = !use_cursor && row_offset >= result->Count();
+	if (finished) {
 		Reset();
 		return PostgresReadResult::FINISHED;
 	}

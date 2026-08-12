@@ -68,6 +68,8 @@ public:
 
 	bool IsOpen();
 	void Close();
+	//! Restore the remote connection to an idle transaction state before caching it.
+	bool Reset();
 
 	shared_ptr<OwnedPostgresConnection> GetConnection() {
 		return connection;

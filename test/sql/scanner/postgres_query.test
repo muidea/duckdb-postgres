@@ -43,6 +43,18 @@ select count(*) from postgres_query('s1', 'SELECT * FROM cars WHERE color=''red'
 ----
 1
 
+# A normal postgres_query scan must reuse the transaction connection when the pool has one slot.
+statement ok
+SET pg_connection_limit=1
+
+query I
+select count(*) from postgres_query('s1', 'SELECT * FROM cars');
+----
+4
+
+statement ok
+SET pg_connection_limit=64
+
 # types
 query IIIIIIII
 SELECT TYPEOF(COLUMNS(*)) FROM postgres_query('s1', 'SELECT * FROM pg_numtypes') LIMIT 1

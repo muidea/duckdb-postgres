@@ -1,0 +1,37 @@
+# name: test/sql/scanner/postgres_text_cursor.test
+# description: Test cursor-backed text protocol scans
+# group: [scanner]
+
+require postgres_scanner
+
+require-env POSTGRES_TEST_DATABASE_AVAILABLE
+
+statement ok
+ATTACH 'dbname=postgresscanner' AS cursor_db (TYPE POSTGRES)
+
+statement ok
+USE cursor_db
+
+statement ok
+CREATE OR REPLACE TABLE text_cursor_rows(i BIGINT)
+
+statement ok
+INSERT INTO text_cursor_rows SELECT * FROM range(10001)
+
+statement ok
+SET pg_use_text_protocol=true
+
+# The final FETCH is empty after a partially consumed batch. A later Read must not FETCH a closed cursor.
+query I
+SELECT count(*) FROM text_cursor_rows
+----
+10001
+
+# Without a remote transaction DECLARE CURSOR falls back to a regular text query.
+query I
+SELECT count(*) FROM postgres_query('cursor_db', 'SELECT * FROM text_cursor_rows', use_transaction=false)
+----
+10001
+
+statement ok
+SET pg_use_text_protocol=false

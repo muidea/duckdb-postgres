@@ -60,6 +60,16 @@ static bool ResultHasError(PGresult *result) {
 	}
 }
 
+static bool ExecuteCommand(PGconn *conn, const char *query) {
+	auto result = PQexec(conn, query);
+	if (!result) {
+		return false;
+	}
+	auto success = PQresultStatus(result) == PGRES_COMMAND_OK;
+	PQclear(result);
+	return success;
+}
+
 PGresult *PostgresConnection::PQExecute(const string &query) {
 	if (PostgresConnection::DebugPrintQueries()) {
 		Printer::Print(query + "\n");
@@ -72,10 +82,12 @@ unique_ptr<PostgresResult> PostgresConnection::TryQuery(const string &query, opt
 	auto result = PQExecute(query.c_str());
 	if (ResultHasError(result)) {
 		if (error_message) {
-			*error_message = StringUtil::Format("Failed to execute query \"" + query +
-			                                    "\": " + string(PQresultErrorMessage(result)));
+			auto pg_error = result ? string(PQresultErrorMessage(result)) : string(PQerrorMessage(GetConn()));
+			*error_message = StringUtil::Format("Failed to execute query \"" + query + "\": " + pg_error);
 		}
-		PQclear(result);
+		if (result) {
+			PQclear(result);
+		}
 		return nullptr;
 	}
 	return make_uniq<PostgresResult>(result);
@@ -144,6 +156,33 @@ void PostgresConnection::Close() {
 		return;
 	}
 	connection = nullptr;
+}
+
+bool PostgresConnection::Reset() {
+	if (!IsOpen()) {
+		return false;
+	}
+
+	lock_guard<mutex> guard(connection->connection_lock);
+	auto conn = GetConn();
+	if (PQstatus(conn) != CONNECTION_OK) {
+		PQreset(conn);
+		return PQstatus(conn) == CONNECTION_OK && PQtransactionStatus(conn) == PQTRANS_IDLE;
+	}
+
+	auto transaction_status = PQtransactionStatus(conn);
+	if (transaction_status == PQTRANS_INTRANS || transaction_status == PQTRANS_INERROR) {
+		if (!ExecuteCommand(conn, "ROLLBACK")) {
+			return false;
+		}
+		transaction_status = PQtransactionStatus(conn);
+	}
+	if (transaction_status != PQTRANS_IDLE) {
+		PQreset(conn);
+		return PQstatus(conn) == CONNECTION_OK && PQtransactionStatus(conn) == PQTRANS_IDLE;
+	}
+
+	return true;
 }
 
 vector<IndexInfo> PostgresConnection::GetIndexInfo(const string &table_name) {

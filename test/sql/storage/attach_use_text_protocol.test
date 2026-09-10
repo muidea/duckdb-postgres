@@ -1,0 +1,30 @@
+# name: test/sql/storage/attach_use_text_protocol.test
+# description: Test enabling the text query protocol for one attached Postgres catalog
+# group: [storage]
+
+require postgres_scanner
+
+require-env POSTGRES_TEST_DATABASE_AVAILABLE
+
+statement ok
+ATTACH 'dbname=postgresscanner' AS text_protocol (TYPE POSTGRES, USE_TEXT_PROTOCOL true)
+
+statement ok
+DROP TABLE IF EXISTS text_protocol.text_protocol_test
+
+statement ok
+CREATE TABLE text_protocol.text_protocol_test(id INTEGER)
+
+statement ok
+INSERT INTO text_protocol.text_protocol_test VALUES (1)
+
+query I
+SELECT id FROM text_protocol.text_protocol_test
+----
+1
+
+statement ok
+DROP TABLE text_protocol.text_protocol_test
+
+statement ok
+DETACH text_protocol

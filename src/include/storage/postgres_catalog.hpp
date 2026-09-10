@@ -21,7 +21,8 @@ class PostgresSchemaEntry;
 class PostgresCatalog : public Catalog {
 public:
 	explicit PostgresCatalog(AttachedDatabase &db_p, string connection_string, string attach_path,
-	                         AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level);
+	                         AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level,
+	                         bool use_text_protocol);
 	~PostgresCatalog();
 
 	string connection_string;
@@ -79,6 +80,9 @@ public:
 	PostgresConnectionPool &GetConnectionPool() {
 		return connection_pool;
 	}
+	bool UseTextProtocol() const {
+		return use_text_protocol;
+	}
 
 	void ClearCache();
 
@@ -104,6 +108,7 @@ private:
 	PostgresSchemaSet schemas;
 	PostgresConnectionPool connection_pool;
 	string default_schema;
+	bool use_text_protocol;
 };
 
 } // namespace duckdb

@@ -11,10 +11,11 @@
 namespace duckdb {
 
 PostgresCatalog::PostgresCatalog(AttachedDatabase &db_p, string connection_string_p, string attach_path_p,
-                                 AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level)
+                                 AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level,
+                                 bool use_text_protocol_p)
     : Catalog(db_p), connection_string(std::move(connection_string_p)), attach_path(std::move(attach_path_p)),
       access_mode(access_mode), isolation_level(isolation_level), schemas(*this, schema_to_load),
-      connection_pool(*this), default_schema(schema_to_load) {
+      connection_pool(*this), default_schema(schema_to_load), use_text_protocol(use_text_protocol_p) {
 	if (default_schema.empty()) {
 		default_schema = "public";
 	}

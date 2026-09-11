@@ -22,7 +22,7 @@ class PostgresCatalog : public Catalog {
 public:
 	explicit PostgresCatalog(AttachedDatabase &db_p, string connection_string, string attach_path,
 	                         AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level,
-	                         bool use_text_protocol);
+	                         bool use_text_protocol, bool use_cursor);
 	~PostgresCatalog();
 
 	string connection_string;
@@ -83,6 +83,9 @@ public:
 	bool UseTextProtocol() const {
 		return use_text_protocol;
 	}
+	bool UseCursor() const {
+		return use_cursor;
+	}
 
 	void ClearCache();
 
@@ -109,6 +112,7 @@ private:
 	PostgresConnectionPool connection_pool;
 	string default_schema;
 	bool use_text_protocol;
+	bool use_cursor;
 };
 
 } // namespace duckdb

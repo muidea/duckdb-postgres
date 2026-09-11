@@ -175,6 +175,7 @@ void PostgresGlobalState::SetConnection(shared_ptr<OwnedPostgresConnection> conn
 void PostgresBindData::SetCatalog(PostgresCatalog &catalog) {
 	this->pg_catalog = &catalog;
 	use_text_protocol = use_text_protocol || catalog.UseTextProtocol();
+	use_cursor = use_cursor && catalog.UseCursor();
 }
 
 void PostgresBindData::SetTable(PostgresTableEntry &table) {

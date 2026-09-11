@@ -45,6 +45,7 @@ public:
 	bool emit_ctid = false;
 	bool use_transaction = true;
 	bool use_text_protocol = false;
+	bool use_cursor = true;
 	idx_t max_threads = 1;
 
 public:

@@ -16,6 +16,11 @@ PostgresTextReader::~PostgresTextReader() {
 
 void PostgresTextReader::BeginCopy(const string &sql) {
 	Reset();
+	if (!bind_data.use_cursor) {
+		result = con.Query(sql);
+		row_offset = 0;
+		return;
+	}
 	string base_sql = sql;
 	StringUtil::RTrim(base_sql);
 	while (!base_sql.empty() && base_sql.back() == ';') {

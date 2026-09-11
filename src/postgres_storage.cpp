@@ -21,6 +21,7 @@ static unique_ptr<Catalog> PostgresAttach(optional_ptr<StorageExtensionInfo> sto
 	string schema_to_load;
 	PostgresIsolationLevel isolation_level = PostgresIsolationLevel::REPEATABLE_READ;
 	bool use_text_protocol = false;
+	bool use_cursor = true;
 	for (auto &entry : attach_options.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "secret") {
@@ -43,6 +44,8 @@ static unique_ptr<Catalog> PostgresAttach(optional_ptr<StorageExtensionInfo> sto
 			}
 		} else if (lower_name == "use_text_protocol") {
 			use_text_protocol = BooleanValue::Get(entry.second);
+		} else if (lower_name == "use_cursor") {
+			use_cursor = BooleanValue::Get(entry.second);
 		} else {
 			throw BinderException("Unrecognized option for Postgres attach: %s", entry.first);
 		}
@@ -50,7 +53,7 @@ static unique_ptr<Catalog> PostgresAttach(optional_ptr<StorageExtensionInfo> sto
 	auto connection_string = PostgresCatalog::GetConnectionString(context, attach_path, secret_name);
 	return make_uniq<PostgresCatalog>(db, std::move(connection_string), std::move(attach_path),
 	                                  attach_options.access_mode, std::move(schema_to_load), isolation_level,
-	                                  use_text_protocol);
+	                                  use_text_protocol, use_cursor);
 }
 
 static unique_ptr<TransactionManager> PostgresCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,

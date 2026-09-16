@@ -20,7 +20,8 @@ PostgresTypeSet::PostgresTypeSet(PostgresSchemaEntry &schema, unique_ptr<Postgre
       composite_type_result(std::move(composite_type_result_p)) {
 }
 
-string PostgresTypeSet::GetInitializeEnumsQuery(PostgresVersion version, const string &schema) {
+string PostgresTypeSet::GetInitializeEnumsQuery(PostgresVersion version, const string &schema,
+                                                bool use_enum_sort_order) {
 	if (version.major_v < 8 || (version.major_v == 8 && version.minor_v < 3)) {
 		// pg_enum support has been present since v8.3 - https://www.postgresql.org/docs/8.3/catalog-pg-enum.html
 		// for older postgres versions we don't support enums instead
@@ -35,13 +36,14 @@ FROM pg_enum e
 JOIN pg_type t ON e.enumtypid = t.oid
 JOIN pg_namespace AS n ON (typnamespace=n.oid)
 ${CONDITION}
-ORDER BY n.oid, enumtypid, enumsortorder;
+ORDER BY n.oid, enumtypid, ${SORT_COLUMN};
 )";
 	string condition;
 	if (!schema.empty()) {
 		condition += "WHERE n.nspname=" + KeywordHelper::WriteQuoted(schema);
 	}
-	return StringUtil::Replace(base_query, "${CONDITION}", condition);
+	base_query = StringUtil::Replace(base_query, "${CONDITION}", condition);
+	return StringUtil::Replace(base_query, "${SORT_COLUMN}", use_enum_sort_order ? "enumsortorder" : "e.oid");
 }
 
 void PostgresTypeSet::CreateEnum(PostgresTransaction &transaction, PostgresResult &result, idx_t start_row,

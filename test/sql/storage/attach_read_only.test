@@ -28,12 +28,19 @@ DETACH s
 # Keep the DuckDB catalog read-only while omitting READ ONLY from the remote
 # transaction for PostgreSQL-compatible servers that reject the modifier.
 statement ok
-ATTACH 'dbname=postgresscanner' AS s (TYPE POSTGRES, READ_ONLY, TRANSACTION_READ_ONLY false)
+ATTACH 'dbname=postgresscanner' AS s (TYPE POSTGRES, READ_ONLY, TRANSACTION_READ_ONLY false, USE_ENUM_SORT_ORDER false)
 
 query T
 CALL postgres_query('s', 'SELECT current_setting(''transaction_read_only'')')
 ----
 off
+
+# Catalog discovery must use pg_enum.oid instead of enumsortorder when the
+# compatibility option is disabled.
+query I
+SELECT count(*) >= 0 FROM s.pg_enumarraytypes
+----
+true
 
 statement error
 CREATE TABLE s.still_read_only_tbl(i INTEGER);

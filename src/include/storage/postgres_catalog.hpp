@@ -22,13 +22,17 @@ class PostgresCatalog : public Catalog {
 public:
 	explicit PostgresCatalog(AttachedDatabase &db_p, string connection_string, string attach_path,
 	                         AccessMode access_mode, string schema_to_load, PostgresIsolationLevel isolation_level,
-	                         bool use_text_protocol, bool use_cursor);
+	                         bool use_text_protocol, bool use_cursor, bool transaction_read_only);
 	~PostgresCatalog();
 
 	string connection_string;
 	string attach_path;
 	AccessMode access_mode;
 	PostgresIsolationLevel isolation_level;
+	//! Whether remote transactions should include READ ONLY. This is independent
+	//! from the DuckDB catalog access mode for PostgreSQL-compatible databases
+	//! that reject the transaction modifier but must still be attached read-only.
+	bool transaction_read_only;
 
 public:
 	void Initialize(bool load_builtin) override;

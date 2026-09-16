@@ -322,9 +322,9 @@ static idx_t PostgresMaxThreads(ClientContext &context, const FunctionData *bind
 static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context, TableFunctionInitInput &input,
                                                          PostgresGlobalState &gstate);
 
-static void PostgresScanConnect(PostgresConnection &conn, const string &snapshot, AccessMode access_mode,
+static void PostgresScanConnect(PostgresConnection &conn, const string &snapshot, bool transaction_read_only,
                                 PostgresIsolationLevel isolation_level) {
-	conn.Execute(PostgresTransaction::GetBeginTransactionQuery(isolation_level, access_mode));
+	conn.Execute(PostgresTransaction::GetBeginTransactionQuery(isolation_level, transaction_read_only));
 	if (!snapshot.empty()) {
 		D_ASSERT(isolation_level != PostgresIsolationLevel::READ_COMMITTED);
 		conn.Query(StringUtil::Format("SET TRANSACTION SNAPSHOT '%s'", snapshot));
@@ -344,7 +344,7 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
 	} else {
 		auto con = PostgresConnection::Open(bind_data.dsn);
 		if (bind_data.use_transaction) {
-			PostgresScanConnect(con, string(), AccessMode::READ_ONLY, PostgresIsolationLevel::REPEATABLE_READ);
+			PostgresScanConnect(con, string(), true, PostgresIsolationLevel::REPEATABLE_READ);
 		}
 		result->SetConnection(std::move(con));
 	}
@@ -421,12 +421,13 @@ bool PostgresGlobalState::TryOpenNewConnection(ClientContext &context, PostgresL
 		lstate.pool_connection = pg_catalog->GetConnectionPool().GetConnection();
 		lstate.connection = PostgresConnection(lstate.pool_connection.GetConnection().GetConnection());
 		if (bind_data.use_transaction) {
-			PostgresScanConnect(lstate.connection, snapshot, pg_catalog->access_mode, pg_catalog->isolation_level);
+			PostgresScanConnect(lstate.connection, snapshot, pg_catalog->transaction_read_only,
+			                    pg_catalog->isolation_level);
 		}
 	} else {
 		lstate.connection = PostgresConnection::Open(bind_data.dsn);
 		if (bind_data.use_transaction) {
-			PostgresScanConnect(lstate.connection, snapshot, AccessMode::READ_ONLY,
+			PostgresScanConnect(lstate.connection, snapshot, true,
 			                    PostgresIsolationLevel::REPEATABLE_READ);
 		}
 	}

@@ -37,7 +37,7 @@ public:
 	unique_ptr<PostgresResult> QueryWithoutTransaction(const string &query);
 	vector<unique_ptr<PostgresResult>> ExecuteQueries(const string &queries);
 	static PostgresTransaction &Get(ClientContext &context, Catalog &catalog);
-	static string GetBeginTransactionQuery(PostgresIsolationLevel isolation_level, AccessMode access_mode);
+	static string GetBeginTransactionQuery(PostgresIsolationLevel isolation_level, bool transaction_read_only);
 
 	optional_ptr<CatalogEntry> ReferenceEntry(shared_ptr<CatalogEntry> &entry);
 
@@ -48,6 +48,7 @@ private:
 	PostgresTransactionState transaction_state;
 	AccessMode access_mode;
 	PostgresIsolationLevel isolation_level;
+	bool transaction_read_only;
 	string temporary_schema;
 	reference_map_t<CatalogEntry, shared_ptr<CatalogEntry>> referenced_entries;
 

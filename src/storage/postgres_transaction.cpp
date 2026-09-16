@@ -10,7 +10,7 @@ namespace duckdb {
 PostgresTransaction::PostgresTransaction(PostgresCatalog &postgres_catalog, TransactionManager &manager,
                                          ClientContext &context)
     : Transaction(manager, context), access_mode(postgres_catalog.access_mode),
-      isolation_level(postgres_catalog.isolation_level) {
+      isolation_level(postgres_catalog.isolation_level), transaction_read_only(postgres_catalog.transaction_read_only) {
 	connection = postgres_catalog.GetConnectionPool().GetConnection();
 }
 
@@ -37,10 +37,10 @@ void PostgresTransaction::Rollback() {
 }
 
 string PostgresTransaction::GetBeginTransactionQuery() {
-	return GetBeginTransactionQuery(isolation_level, access_mode);
+	return GetBeginTransactionQuery(isolation_level, transaction_read_only);
 }
 
-string PostgresTransaction::GetBeginTransactionQuery(PostgresIsolationLevel isolation_level, AccessMode access_mode) {
+string PostgresTransaction::GetBeginTransactionQuery(PostgresIsolationLevel isolation_level, bool transaction_read_only) {
 	string result = "BEGIN TRANSACTION ISOLATION LEVEL ";
 	switch (isolation_level) {
 	case PostgresIsolationLevel::READ_COMMITTED:
@@ -55,7 +55,7 @@ string PostgresTransaction::GetBeginTransactionQuery(PostgresIsolationLevel isol
 	default:
 		throw InternalException("Unsupported isolation level");
 	}
-	if (access_mode == AccessMode::READ_ONLY) {
+	if (transaction_read_only) {
 		result += " READ ONLY";
 	}
 	return result;

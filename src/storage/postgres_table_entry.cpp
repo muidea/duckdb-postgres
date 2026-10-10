@@ -2,6 +2,7 @@
 #include "storage/postgres_table_entry.hpp"
 #include "storage/postgres_transaction.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "postgres_scanner.hpp"
@@ -32,8 +33,12 @@ unique_ptr<BaseStatistics> PostgresTableEntry::GetStatistics(ClientContext &cont
 	return nullptr;
 }
 
-void PostgresTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &, LogicalProjection &, LogicalUpdate &,
+void PostgresTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &, LogicalProjection &, LogicalUpdate &update,
                                                ClientContext &) {
+	// PostgreSQL plans a native UPDATE rather than DuckDB's delete/insert
+	// rewrite. LogicalUpdate leaves this field uninitialized; the storage
+	// binding callback owns its initialization, even for non-executing probes.
+	update.update_is_del_and_insert = false;
 }
 
 TableFunction PostgresTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {

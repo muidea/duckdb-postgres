@@ -11,6 +11,8 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
 #include "postgres_connection.hpp"
+#include "postgres_catalog_cache.hpp"
+#include <memory>
 #include "storage/postgres_schema_set.hpp"
 #include "storage/postgres_connection_pool.hpp"
 
@@ -96,6 +98,10 @@ public:
 
 	void ClearCache();
 
+	std::shared_ptr<PostgresCatalogCacheBudget> GetTableCacheBudget() {
+		return table_cache_budget;
+	}
+
 	//! Whether or not this catalog should search a specific type with the standard priority
 	CatalogLookupBehavior CatalogTypeLookupRule(CatalogType type) const override {
 		switch (type) {
@@ -114,6 +120,7 @@ private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 
 private:
+	std::shared_ptr<PostgresCatalogCacheBudget> table_cache_budget = std::make_shared<PostgresCatalogCacheBudget>();
 	PostgresVersion version;
 	PostgresSchemaSet schemas;
 	PostgresConnectionPool connection_pool;

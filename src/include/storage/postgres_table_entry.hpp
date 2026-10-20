@@ -11,6 +11,8 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "postgres_utils.hpp"
+#include "postgres_catalog_cache.hpp"
+#include <memory>
 
 namespace duckdb {
 
@@ -42,6 +44,10 @@ class PostgresTableEntry : public TableCatalogEntry {
 public:
 	PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info);
 	PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, PostgresTableInfo &info);
+	~PostgresTableEntry() override;
+	bool RetainInCatalog() const {
+		return cache_retained;
+	}
 
 public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
@@ -65,6 +71,12 @@ public:
 	vector<string> postgres_names;
 	//! The approximate number of pages a table consumes in Postgres
 	idx_t approx_num_pages;
+
+private:
+	void AccountCacheMemory();
+	std::shared_ptr<PostgresCatalogCacheBudget> cache_budget;
+	uint64_t cache_bytes = 0;
+	bool cache_retained = false;
 };
 
 } // namespace duckdb

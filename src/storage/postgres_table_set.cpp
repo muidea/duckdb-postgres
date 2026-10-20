@@ -1,22 +1,21 @@
 #include "storage/postgres_table_set.hpp"
-#include "storage/postgres_transaction.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
-#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
-#include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/parser/constraints/list.hpp"
-#include "storage/postgres_schema_entry.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/common/string_util.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "postgres_conversion.hpp"
+#include "storage/postgres_schema_entry.hpp"
+#include "storage/postgres_transaction.hpp"
 
 namespace duckdb {
 
 PostgresTableSet::PostgresTableSet(PostgresSchemaEntry &schema, unique_ptr<PostgresResultSlice> table_result_p)
-    : PostgresInSchemaSet(schema, !table_result_p), table_result(std::move(table_result_p)) {
+    : PostgresInSchemaSet(schema, false), table_result(std::move(table_result_p)) {
 }
 
 string PostgresTableSet::GetInitializeQuery(const string &schema, const string &table) {
@@ -118,15 +117,21 @@ void PostgresTableSet::AddColumnOrConstraint(optional_ptr<PostgresTransaction> t
 	}
 }
 
-void PostgresTableSet::CreateEntries(PostgresTransaction &transaction, PostgresResult &result, idx_t start, idx_t end) {
-	vector<unique_ptr<PostgresTableInfo>> tables;
+void PostgresTableSet::CreateEntries(PostgresTransaction &transaction, PostgresResult &result, idx_t start, idx_t end,
+                                     const std::function<void(CatalogEntry &)> *callback) {
 	unique_ptr<PostgresTableInfo> info;
+	auto publish = [&]() {
+		auto entry = CreateEntry(transaction, make_shared_ptr<PostgresTableEntry>(catalog, schema, *info));
+		if (callback) {
+			(*callback)(*entry);
+		}
+	};
 
 	for (idx_t row = start; row < end; row++) {
 		auto table_name = result.GetString(row, 1);
 		if (!info || info->GetTableName() != table_name) {
 			if (info) {
-				tables.push_back(std::move(info));
+				publish();
 			}
 			auto approx_num_pages = result.IsNull(row, 2) ? 0 : result.GetInt64(row, 2);
 			info = make_uniq<PostgresTableInfo>(schema, table_name);
@@ -135,12 +140,27 @@ void PostgresTableSet::CreateEntries(PostgresTransaction &transaction, PostgresR
 		AddColumnOrConstraint(&transaction, &schema, result, row, *info);
 	}
 	if (info) {
-		tables.push_back(std::move(info));
+		publish();
 	}
-	for (auto &tbl_info : tables) {
-		auto table_entry = make_shared_ptr<PostgresTableEntry>(catalog, schema, *tbl_info);
-		CreateEntry(transaction, std::move(table_entry));
+}
+
+optional_ptr<CatalogEntry> PostgresTableSet::CreateEntry(PostgresTransaction &transaction,
+                                                         shared_ptr<CatalogEntry> entry) {
+	entry->internal = schema.internal;
+	if (!entry->Cast<PostgresTableEntry>().RetainInCatalog()) {
+		// Preserve native references for the entire transaction, without keeping
+		// another owner in the catalog. No in-use object is forcibly evicted.
+		return transaction.ReferenceEntry(entry);
 	}
+	return PostgresInSchemaSet::CreateEntry(transaction, std::move(entry));
+}
+
+void PostgresTableSet::Scan(PostgresTransaction &transaction, const std::function<void(CatalogEntry &)> &callback) {
+	// Enumeration remains complete when only a bounded hot subset is retained.
+	// Borrowed entries live until transaction end; this is not a constant-memory
+	// operation and does not promise an RSS bound for arbitrary enumeration.
+	auto result = transaction.Query(GetInitializeQuery(schema.name));
+	CreateEntries(transaction, *result, 0, result->Count(), &callback);
 }
 
 void PostgresTableSet::LoadEntries(PostgresTransaction &transaction) {
@@ -192,13 +212,27 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(PostgresConnection 
 optional_ptr<CatalogEntry> PostgresTableSet::ReloadEntry(PostgresTransaction &transaction, const string &table_name) {
 	auto table_info = GetTableInfo(transaction, schema, table_name);
 	if (!table_info) {
-		return nullptr;
+		// Prefer an exact remote spelling even when another case variant was
+		// cached earlier. Only resolve the folded spelling after an exact miss.
+		auto result = transaction.Query("SELECT relname FROM pg_class JOIN pg_namespace ON "
+		                                "relnamespace=pg_namespace.oid WHERE nspname=" +
+		                                KeywordHelper::WriteQuoted(schema.name) + " AND lower(relname)=lower(" +
+		                                KeywordHelper::WriteQuoted(table_name) +
+		                                ") AND relkind IN ('r','v','m','f','p') ORDER BY relname LIMIT 1");
+		if (result->Count() == 0) {
+			return nullptr;
+		}
+		table_info = GetTableInfo(transaction, schema, result->GetString(0, 0));
+		if (!table_info) {
+			return nullptr;
+		}
 	}
 	auto table_entry = make_shared_ptr<PostgresTableEntry>(catalog, schema, *table_info);
 	return CreateEntry(transaction, std::move(table_entry));
 }
 
-// FIXME - this is almost entirely copied from TableCatalogEntry::ColumnsToSQL - should be unified
+// FIXME - this is almost entirely copied from TableCatalogEntry::ColumnsToSQL -
+// should be unified
 string PostgresColumnsToSQL(const ColumnList &columns, const vector<unique_ptr<Constraint>> &constraints) {
 	std::stringstream ss;
 

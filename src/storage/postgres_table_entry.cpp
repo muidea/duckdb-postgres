@@ -19,6 +19,7 @@ PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
 		postgres_names.push_back(col.GetName());
 	}
 	approx_num_pages = 0;
+	AccountCacheMemory();
 }
 
 PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, PostgresTableInfo &info)
@@ -26,6 +27,28 @@ PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
       postgres_names(std::move(info.postgres_names)) {
 	D_ASSERT(postgres_types.size() == columns.LogicalColumnCount());
 	approx_num_pages = info.approx_num_pages;
+	AccountCacheMemory();
+}
+
+void PostgresTableEntry::AccountCacheMemory() {
+	// Conservative payload estimate; nested logical type internals and general
+	// allocator overhead are not measurable here. Track this as estimated bytes.
+	cache_bytes = sizeof(*this) + name.capacity() + postgres_types.capacity() * sizeof(PostgresType) +
+	              postgres_names.capacity() * sizeof(string);
+	for (auto &remote_name : postgres_names) {
+		cache_bytes += remote_name.capacity();
+	}
+	for (auto &column : columns.Logical()) {
+		cache_bytes += 1024 + column.GetName().capacity() + 4 * column.GetType().ToString().size();
+	}
+	cache_budget = catalog.Cast<PostgresCatalog>().GetTableCacheBudget();
+	cache_retained = cache_budget->Acquire(cache_bytes);
+}
+
+PostgresTableEntry::~PostgresTableEntry() {
+	if (cache_budget) {
+		cache_budget->Release(cache_bytes, cache_retained);
+	}
 }
 
 unique_ptr<BaseStatistics> PostgresTableEntry::GetStatistics(ClientContext &context, column_t column_id) {

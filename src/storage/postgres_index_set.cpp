@@ -1,15 +1,15 @@
 #include "storage/postgres_index_set.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "storage/postgres_index_entry.hpp"
 #include "storage/postgres_schema_entry.hpp"
 #include "storage/postgres_transaction.hpp"
-#include "duckdb/parser/parsed_data/create_schema_info.hpp"
-#include "storage/postgres_index_entry.hpp"
-#include "duckdb/parser/expression/columnref_expression.hpp"
-#include "duckdb/parser/parsed_expression_iterator.hpp"
 
 namespace duckdb {
 
 PostgresIndexSet::PostgresIndexSet(PostgresSchemaEntry &schema, unique_ptr<PostgresResultSlice> index_result_p)
-    : PostgresInSchemaSet(schema, !index_result_p), index_result(std::move(index_result_p)) {
+    : PostgresInSchemaSet(schema, false), index_result(std::move(index_result_p)) {
 }
 
 string PostgresIndexSet::GetInitializeQuery(const string &schema) {
@@ -29,7 +29,8 @@ ORDER BY pg_namespace.oid;
 
 void PostgresIndexSet::LoadEntries(PostgresTransaction &transaction) {
 	if (!index_result) {
-		throw InternalException("PostgresIndexSet::LoadEntries called without an index result defined");
+		auto result = shared_ptr<PostgresResult>(transaction.Query(GetInitializeQuery(schema.name)).release());
+		index_result = make_uniq<PostgresResultSlice>(result, 0, result->Count());
 	}
 	auto &result = index_result->GetResult();
 	for (idx_t row = index_result->start; row < index_result->end; row++) {

@@ -24,6 +24,50 @@
 
 using namespace duckdb;
 
+struct PostgresCatalogCacheStatsState : public GlobalTableFunctionState {
+	bool finished = false;
+};
+
+static unique_ptr<FunctionData> BindPostgresCatalogCacheStats(ClientContext &context, TableFunctionBindInput &input,
+                                                              vector<LogicalType> &types, vector<string> &names) {
+	names = {"estimated_live_bytes", "estimated_retained_bytes", "live_entries", "estimated_peak_bytes",
+	         "uncached_loads"};
+	types = vector<LogicalType>(names.size(), LogicalType::UBIGINT);
+	return nullptr;
+}
+
+static unique_ptr<GlobalTableFunctionState> InitPostgresCatalogCacheStats(ClientContext &context,
+                                                                          TableFunctionInitInput &input) {
+	return make_uniq<PostgresCatalogCacheStatsState>();
+}
+
+static void ScanPostgresCatalogCacheStats(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<PostgresCatalogCacheStatsState>();
+	if (state.finished) {
+		return;
+	}
+	state.finished = true;
+	PostgresCatalogCacheBudget::Stats total;
+	for (auto &database : DatabaseManager::Get(context).GetDatabases(context)) {
+		auto &catalog = database->GetCatalog();
+		if (catalog.GetCatalogType() != "postgres") {
+			continue;
+		}
+		auto stats = catalog.Cast<PostgresCatalog>().GetTableCacheBudget()->Read();
+		total.live_bytes += stats.live_bytes;
+		total.retained_bytes += stats.retained_bytes;
+		total.live_entries += stats.live_entries;
+		total.peak_bytes += stats.peak_bytes;
+		total.uncached_loads += stats.uncached_loads;
+	}
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::UBIGINT(total.live_bytes));
+	output.SetValue(1, 0, Value::UBIGINT(total.retained_bytes));
+	output.SetValue(2, 0, Value::UBIGINT(total.live_entries));
+	output.SetValue(3, 0, Value::UBIGINT(total.peak_bytes));
+	output.SetValue(4, 0, Value::UBIGINT(total.uncached_loads));
+}
+
 class PostgresExtensionState : public ClientContextState {
 public:
 	bool CanRequestRebind() override {
@@ -128,6 +172,8 @@ void SetPostgresNullByteReplacement(ClientContext &context, SetScope scope, Valu
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	loader.RegisterFunction(TableFunction("postgres_catalog_cache_stats", {}, ScanPostgresCatalogCacheStats,
+	                                      BindPostgresCatalogCacheStats, InitPostgresCatalogCacheStats));
 	PostgresScanFunction postgres_fun;
 	loader.RegisterFunction(postgres_fun);
 

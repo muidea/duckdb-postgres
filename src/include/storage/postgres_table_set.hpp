@@ -29,12 +29,17 @@ public:
 	static unique_ptr<PostgresTableInfo> GetTableInfo(PostgresConnection &connection, const string &schema_name,
 	                                                  const string &table_name);
 	optional_ptr<CatalogEntry> ReloadEntry(PostgresTransaction &transaction, const string &table_name) override;
+	optional_ptr<CatalogEntry> CreateEntry(PostgresTransaction &transaction, shared_ptr<CatalogEntry> entry) override;
+	void Scan(PostgresTransaction &transaction, const std::function<void(CatalogEntry &)> &callback) override;
 
 	void AlterTable(PostgresTransaction &transaction, AlterTableInfo &info);
 
 	static string GetInitializeQuery(const string &schema = string(), const string &table = string());
 
 protected:
+	bool SupportsPointLookup() const override {
+		return true;
+	}
 	void LoadEntries(PostgresTransaction &transaction) override;
 	bool SupportReload() const override {
 		return true;
@@ -52,7 +57,8 @@ protected:
 	                                  optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result, idx_t row,
 	                                  PostgresTableInfo &table_info);
 
-	void CreateEntries(PostgresTransaction &transaction, PostgresResult &result, idx_t start, idx_t end);
+	void CreateEntries(PostgresTransaction &transaction, PostgresResult &result, idx_t start, idx_t end,
+	                   const std::function<void(CatalogEntry &)> *callback = nullptr);
 
 private:
 	string GetAlterTablePrefix(PostgresTransaction &transaction, const string &name);

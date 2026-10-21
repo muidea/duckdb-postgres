@@ -8,10 +8,10 @@
 
 #pragma once
 
-#include "duckdb/transaction/transaction.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
 struct DropInfo;
@@ -25,7 +25,7 @@ public:
 
 	optional_ptr<CatalogEntry> GetEntry(PostgresTransaction &transaction, const string &name);
 	void DropEntry(PostgresTransaction &transaction, DropInfo &info);
-	void Scan(PostgresTransaction &transaction, const std::function<void(CatalogEntry &)> &callback);
+	virtual void Scan(PostgresTransaction &transaction, const std::function<void(CatalogEntry &)> &callback);
 	virtual optional_ptr<CatalogEntry> CreateEntry(PostgresTransaction &transaction, shared_ptr<CatalogEntry> entry);
 	void ClearEntries();
 	virtual bool SupportReload() const {
@@ -34,6 +34,9 @@ public:
 	virtual optional_ptr<CatalogEntry> ReloadEntry(PostgresTransaction &transaction, const string &name);
 
 protected:
+	virtual bool SupportsPointLookup() const {
+		return false;
+	}
 	virtual void LoadEntries(PostgresTransaction &transaction) = 0;
 	//! Whether or not the catalog set contains dependencies to itself that have
 	//! to be resolved WHILE loading

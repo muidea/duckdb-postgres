@@ -1,7 +1,7 @@
 #include "storage/postgres_catalog_set.hpp"
-#include "storage/postgres_transaction.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "storage/postgres_schema_entry.hpp"
+#include "storage/postgres_transaction.hpp"
 
 namespace duckdb {
 
@@ -9,7 +9,9 @@ PostgresCatalogSet::PostgresCatalogSet(Catalog &catalog, bool is_loaded_p) : cat
 }
 
 optional_ptr<CatalogEntry> PostgresCatalogSet::GetEntry(PostgresTransaction &transaction, const string &name) {
-	TryLoadEntries(transaction);
+	if (!SupportsPointLookup()) {
+		TryLoadEntries(transaction);
+	}
 	{
 		lock_guard<mutex> l(entry_lock);
 		auto entry = entries.find(name);
@@ -19,7 +21,7 @@ optional_ptr<CatalogEntry> PostgresCatalogSet::GetEntry(PostgresTransaction &tra
 		}
 		// check the case insensitive map if there are any entries
 		auto name_entry = entry_map.find(name);
-		if (name_entry != entry_map.end()) {
+		if (name_entry != entry_map.end() && (!SupportsPointLookup() || is_loaded)) {
 			// try again with the entry we found in the case insensitive map
 			auto entry = entries.find(name_entry->second);
 			if (entry != entries.end()) {
@@ -51,7 +53,12 @@ void PostgresCatalogSet::TryLoadEntries(PostgresTransaction &transaction) {
 		return;
 	}
 	is_loaded = true;
-	LoadEntries(transaction);
+	try {
+		LoadEntries(transaction);
+	} catch (...) {
+		is_loaded = false;
+		throw;
+	}
 }
 
 optional_ptr<CatalogEntry> PostgresCatalogSet::ReloadEntry(PostgresTransaction &transaction, const string &name) {

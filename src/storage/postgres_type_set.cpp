@@ -1,10 +1,11 @@
 #include "storage/postgres_type_set.hpp"
-#include "storage/postgres_transaction.hpp"
-#include "duckdb/parser/parsed_data/create_type_info.hpp"
-#include "storage/postgres_type_entry.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
-#include "storage/postgres_schema_entry.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "storage/postgres_catalog.hpp"
+#include "storage/postgres_schema_entry.hpp"
+#include "storage/postgres_transaction.hpp"
+#include "storage/postgres_type_entry.hpp"
 
 namespace duckdb {
 
@@ -16,15 +17,16 @@ struct PGTypeInfo {
 
 PostgresTypeSet::PostgresTypeSet(PostgresSchemaEntry &schema, unique_ptr<PostgresResultSlice> enum_result_p,
                                  unique_ptr<PostgresResultSlice> composite_type_result_p)
-    : PostgresInSchemaSet(schema, !enum_result_p), enum_result(std::move(enum_result_p)),
+    : PostgresInSchemaSet(schema, false), enum_result(std::move(enum_result_p)),
       composite_type_result(std::move(composite_type_result_p)) {
 }
 
 string PostgresTypeSet::GetInitializeEnumsQuery(PostgresVersion version, const string &schema,
                                                 bool use_enum_sort_order) {
 	if (version.major_v < 8 || (version.major_v == 8 && version.minor_v < 3)) {
-		// pg_enum support has been present since v8.3 - https://www.postgresql.org/docs/8.3/catalog-pg-enum.html
-		// for older postgres versions we don't support enums instead
+		// pg_enum support has been present since v8.3 -
+		// https://www.postgresql.org/docs/8.3/catalog-pg-enum.html for older
+		// postgres versions we don't support enums instead
 		return R"(
 SELECT 0 AS oid, 0 AS enumtypid, '' AS typname, '' AS enumlabel
 LIMIT 0;
@@ -149,7 +151,16 @@ void PostgresTypeSet::InitializeCompositeTypes(PostgresTransaction &transaction,
 
 void PostgresTypeSet::LoadEntries(PostgresTransaction &transaction) {
 	if (!enum_result || !composite_type_result) {
-		throw InternalException("PostgresTypeSet::LoadEntries not defined without enum/composite type result");
+		auto &pg_catalog = catalog.Cast<PostgresCatalog>();
+		auto enums =
+		    shared_ptr<PostgresResult>(transaction
+		                                   .Query(GetInitializeEnumsQuery(pg_catalog.GetPostgresVersion(), schema.name,
+		                                                                  pg_catalog.use_enum_sort_order))
+		                                   .release());
+		auto composites =
+		    shared_ptr<PostgresResult>(transaction.Query(GetInitializeCompositesQuery(schema.name)).release());
+		enum_result = make_uniq<PostgresResultSlice>(enums, 0, enums->Count());
+		composite_type_result = make_uniq<PostgresResultSlice>(composites, 0, composites->Count());
 	}
 	InitializeEnums(transaction, *enum_result);
 	InitializeCompositeTypes(transaction, *composite_type_result);

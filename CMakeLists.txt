@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 2.8.12...3.29)
 set(TARGET_NAME postgres_scanner)
 project(${TARGET_NAME})
+option(POSTGRES_GUARDED_CRUD "Build explicit guarded CRUD runtime" OFF)
 
 add_definitions(-DFRONTEND=1 -D_GNU_SOURCE=1)
 add_definitions(-DUSE_OPENSSL=1 -DHAVE_BIO_GET_DATA=1 -DHAVE_BIO_METH_NEW=1)
@@ -56,7 +57,7 @@ set(LIBPG_SOURCES
     postgres/src/interfaces/libpq/fe-auth-scram.c
     postgres/src/interfaces/libpq/fe-auth.c
     postgres/src/interfaces/libpq/fe-connect.c
-    postgres/src/interfaces/libpq/fe-exec.c
+    src/postgres_crud_libpq.c
     postgres/src/interfaces/libpq/fe-lobj.c
     postgres/src/interfaces/libpq/fe-misc.c
     postgres/src/interfaces/libpq/fe-print.c

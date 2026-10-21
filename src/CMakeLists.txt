@@ -18,6 +18,10 @@ add_library(
   postgres_storage.cpp
   postgres_text_reader.cpp
   postgres_utils.cpp)
+if(POSTGRES_GUARDED_CRUD)
+  target_sources(postgres_ext_library PRIVATE postgres_guarded_crud.cpp)
+  target_compile_definitions(postgres_ext_library PRIVATE POSTGRES_GUARDED_CRUD=1)
+endif()
 set(ALL_OBJECT_FILES
     ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:postgres_ext_library>
     PARENT_SCOPE)

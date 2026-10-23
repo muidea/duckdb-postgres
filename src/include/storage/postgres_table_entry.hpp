@@ -37,6 +37,8 @@ struct PostgresTableInfo {
 	unique_ptr<CreateTableInfo> create_info;
 	vector<PostgresType> postgres_types;
 	vector<string> postgres_names;
+	//! Source attnum for each visible column; dropped attributes leave gaps.
+	vector<idx_t> postgres_attnums;
 	idx_t approx_num_pages = 0;
 };
 

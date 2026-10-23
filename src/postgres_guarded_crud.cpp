@@ -5,7 +5,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "storage/postgres_catalog.hpp"
-#include "postgres_crud_metadata.hpp"
+#include "postgres_family_metadata.hpp"
 
 extern "C" {
 PGresult *PQfqeBindPortal(PGconn *, int, const char *const *);
@@ -16,7 +16,7 @@ namespace duckdb {
 namespace {
 struct Data : TableFunctionData {
     PostgresCatalog &catalog;
-    string schema, table, expected, version, sql;
+    string schema, table, expected, version, sql, product;
     vector<Value> params;
     bool execute;
     Data(PostgresCatalog &c, bool exec) : catalog(c), execute(exec) {}
@@ -29,8 +29,12 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
                                     vector<LogicalType> &types, vector<string> &names) {
     for (auto &v : in.inputs) if (v.IsNull()) throw BinderException("guarded PostgreSQL input is incomplete");
     auto db = DatabaseManager::Get(ctx).GetDatabase(ctx, in.inputs[0].GetValue<string>());
-    if (!db || db->GetCatalog().GetCatalogType() != "postgres") throw BinderException("guarded PostgreSQL catalog unavailable");
+    if (!db || db->GetCatalog().GetCatalogType() != POSTGRES_CRUD_PRODUCT) throw BinderException("guarded PostgreSQL catalog unavailable");
     auto data = make_uniq<Data>(db->GetCatalog().Cast<PostgresCatalog>(), in.inputs.size() == 6);
+    auto &function_name = in.table_function.name;
+    data->product = function_name.substr(0, function_name.find('_'));
+    if (data->product != POSTGRES_CRUD_PRODUCT && data->product != GREENPLUM_CRUD_PRODUCT && data->product != KINGBASE_CRUD_PRODUCT)
+        throw BinderException("guarded source contract unavailable");
     data->schema = in.inputs[1].GetValue<string>(); data->table = in.inputs[2].GetValue<string>();
     if (data->execute) {
         data->expected = in.inputs[3].GetValue<string>(); data->version = in.inputs[4].GetValue<string>();
@@ -68,12 +72,19 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         auto reset = Wrap(PQexec(raw, "DISCARD ALL")); if (!OK(reset.get())) throw IOException("guarded reset failed");
         auto identity = Wrap(PQexec(raw, "SELECT current_setting('server_version'),version(),current_setting('transaction_read_only')"));
         if (!identity || PQresultStatus(identity.get()) != PGRES_TUPLES_OK || PQntuples(identity.get()) != 1 ||
-            string(PQgetvalue(identity.get(),0,1)).find("PostgreSQL ") != 0 || string(PQgetvalue(identity.get(),0,2)) != "off")
+            string(PQgetvalue(identity.get(),0,2)) != "off")
             throw IOException("guarded identity unavailable");
-        version = PQgetvalue(identity.get(),0,0);
+        string identity_text = PQgetvalue(identity.get(),0,1);
+        if ((d.product == POSTGRES_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("Greenplum") != string::npos)) ||
+            (d.product == GREENPLUM_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("(Greenplum Database 6.") == string::npos)) ||
+            (d.product == KINGBASE_CRUD_PRODUCT && identity_text.find("KingbaseES V008R006") != 0))
+            throw IOException("guarded source product mismatch");
+        version = d.product == POSTGRES_CRUD_PRODUCT ? string(PQgetvalue(identity.get(),0,0)) : identity_text;
         if (d.execute && version != d.version) throw IOException("guarded backend changed");
         auto begin = Wrap(PQexec(raw, "BEGIN ISOLATION LEVEL READ COMMITTED")); if (!OK(begin.get())) throw IOException("guarded begin failed");
-        auto settings = Wrap(PQexec(raw, "SET LOCAL search_path=pg_catalog; SET LOCAL statement_timeout='25s'; SET LOCAL lock_timeout='5s'; SET LOCAL timezone='UTC'; SET LOCAL client_encoding='UTF8'; SET LOCAL row_security=on; SET LOCAL datestyle='ISO,YMD'"));
+        string settings_sql = "SET LOCAL search_path=pg_catalog; SET LOCAL statement_timeout='25s'; SET LOCAL lock_timeout='5s'; SET LOCAL timezone='UTC'; SET LOCAL client_encoding='UTF8'; SET LOCAL datestyle='ISO,YMD'; SET LOCAL standard_conforming_strings=on";
+        if (d.product != GREENPLUM_CRUD_PRODUCT) settings_sql += "; SET LOCAL row_security=on";
+        auto settings = Wrap(PQexec(raw, settings_sql.c_str()));
         if (!OK(settings.get())) throw IOException("guarded settings failed");
         if (d.execute) {
             auto lock = Wrap(PQexec(raw, ("LOCK TABLE ONLY " + KeywordHelper::WriteQuoted(d.schema, '"') + "." + KeywordHelper::WriteQuoted(d.table, '"') + " IN SHARE UPDATE EXCLUSIVE MODE").c_str()));
@@ -88,7 +99,8 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             if (!OK(bound.get()) || PQnfields(bound.get()) != 0) { error = ErrorState(bound.get()); throw IOException("guarded portal unavailable"); }
         }
         const char *args[] = {d.schema.c_str(),d.table.c_str()};
-        auto meta = Wrap(PQexecParams(raw,FQE_POSTGRES_METADATA_SQL,2,nullptr,args,nullptr,nullptr,0));
+        auto metadata_sql = PostgresFamilyMetadataSQL(d.product);
+        auto meta = Wrap(PQexecParams(raw,metadata_sql.c_str(),2,nullptr,args,nullptr,nullptr,0));
         if (!meta || PQresultStatus(meta.get()) != PGRES_TUPLES_OK || PQntuples(meta.get()) != 1 || PQgetisnull(meta.get(),0,0)) throw IOException("guarded descriptor unavailable");
         descriptor = PQgetvalue(meta.get(),0,0);
         if (d.execute) {
@@ -131,10 +143,12 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 }
 void RegisterPostgresGuardedCRUD(ExtensionLoader &loader) {
-    TableFunction metadata("postgres_crud_metadata_v1",{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
-    loader.RegisterFunction(metadata);
-    TableFunction exec("postgres_guarded_mutation_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
-    exec.named_parameters["params"] = LogicalType::ANY;
-    loader.RegisterFunction(exec);
+    for (auto &product : {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
+        TableFunction metadata(string(product) + "_crud_metadata_v1",{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
+        loader.RegisterFunction(metadata);
+        TableFunction exec(string(product) + "_guarded_mutation_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
+        exec.named_parameters["params"] = LogicalType::ANY;
+        loader.RegisterFunction(exec);
+    }
 }
 }

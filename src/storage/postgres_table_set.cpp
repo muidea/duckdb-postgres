@@ -28,7 +28,7 @@ FROM pg_class
 JOIN pg_namespace ON relnamespace = pg_namespace.oid
 JOIN pg_attribute ON pg_class.oid=pg_attribute.attrelid
 JOIN pg_type ON atttypid=pg_type.oid
-WHERE attnum > 0 AND relkind IN ('r', 'v', 'm', 'f', 'p') ${CONDITION}
+WHERE attnum > 0 AND NOT pg_attribute.attisdropped AND relkind IN ('r', 'v', 'm', 'f', 'p') ${CONDITION}
 UNION ALL
 SELECT pg_namespace.oid AS namespace_id, relname, NULL relpages, NULL attname, NULL type_name,
     NULL type_modifier, NULL ndim, NULL attnum, NULL AS notnull,
@@ -66,6 +66,12 @@ void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
 	auto column_type = PostgresUtils::TypeToLogicalType(transaction, schema, type_info, postgres_type);
 	table_info.postgres_types.push_back(std::move(postgres_type));
 	table_info.postgres_names.push_back(column_name);
+	auto attnum = result.GetInt64(row, column_index + 4);
+	if (attnum <= 0 || (!table_info.postgres_attnums.empty() &&
+	                    idx_t(attnum) <= table_info.postgres_attnums.back())) {
+		throw InvalidInputException("Invalid PostgreSQL column attribute order");
+	}
+	table_info.postgres_attnums.push_back(idx_t(attnum));
 	ColumnDefinition column(std::move(column_name), std::move(column_type));
 	if (!default_value.empty()) {
 		auto expressions = Parser::ParseExpressionList(default_value);
@@ -97,10 +103,14 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
 	vector<string> columns;
 	for (auto &split : splits) {
 		auto index = std::stoull(split);
-		if (index <= 0 || index > create_info.columns.LogicalColumnCount()) {
-			return;
+		idx_t visible = 0;
+		while (visible < table_info.postgres_attnums.size() && table_info.postgres_attnums[visible] != index) {
+			visible++;
 		}
-		columns.push_back(create_info.columns.GetColumn(LogicalIndex(index - 1)).Name());
+		if (visible == table_info.postgres_attnums.size()) {
+			throw InvalidInputException("PostgreSQL constraint references an unavailable column attribute");
+		}
+		columns.push_back(create_info.columns.GetColumn(LogicalIndex(visible)).Name());
 	}
 
 	create_info.constraints.push_back(make_uniq<UniqueConstraint>(std::move(columns), constraint_type == "p"));

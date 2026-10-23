@@ -41,7 +41,7 @@ class Fixture(socketserver.ThreadingTCPServer):
         self.queries = []
         self.errors = []
         self.fail_once = True
-        self.tables = {'Foo': ['upper_id'], 'foo': ['lower_id'], 'typed': ['mood', 'pair']}
+        self.tables = {'Foo': ['upper_id'], 'foo': ['lower_id'], 'typed': ['mood', 'pair'], 'gap': ['gap_key', 'gap_part']}
         self.tables.update(('t%04d' % i, ['col%d' % c for c in range(32)]) for i in range(550))
 
     def handle_error(self, request, client_address):
@@ -80,9 +80,11 @@ class Fixture(socketserver.ThreadingTCPServer):
             for name in names:
                 for i, col in enumerate(self.tables.get(name, [])):
                     typ = col if name == 'typed' else 'int4'
-                    rows.append([100, name, 1, col, typ, -1, 0, i+1, 't', None, None, None])
+                    rows.append([100, name, 1, col, typ, -1, 0, ([2, 4][i] if name == 'gap' else i+1), 't', None, None, None])
                 if name == 'Foo':
                     rows.append([100, name, None, None, None, None, None, None, None, 902, 'p', '{1}'])
+                if name == 'gap':
+                    rows.append([100, name, None, None, None, None, None, None, None, 903, 'p', '{2,4}'])
             return result(rows, 12)
         if 'FROM pg_indexes' in q:
             assert 'pg_namespace.nspname=' in q, q
@@ -133,6 +135,7 @@ DESCRIBE SELECT * FROM src.public.Foo;
 DESCRIBE SELECT * FROM src.public.foo;
 DESCRIBE SELECT * FROM src.public.fOo;
 DESCRIBE SELECT * FROM src.public.typed;
+DESCRIBE SELECT * FROM src.public.gap;
 DESCRIBE SELECT * FROM src.public.retry;
 DESCRIBE SELECT * FROM src.public.retry;
 '''
@@ -153,8 +156,9 @@ SELECT estimated_live_bytes=0 AND live_entries=0 AS cleared_ok FROM postgres_cat
         assert 'retry_id,INTEGER' in run.stdout, run.stdout[-2000:]
         assert 'upper_id,INTEGER' in run.stdout and 'lower_id,INTEGER' in run.stdout
         assert 'upper_id,INTEGER,NO,PRI' in run.stdout, run.stdout[:2000]
+        assert 'gap_key,INTEGER,NO,PRI' in run.stdout and 'gap_part,INTEGER,NO,PRI' in run.stdout, run.stdout[:2500]
         assert 'happy' in run.stdout and 'STRUCT' in run.stdout, run.stdout[:2000]
-        assert run.stdout.rstrip().endswith('true\n554\ntrue\n0\ntrue'), run.stdout[-1000:]
+        assert run.stdout.rstrip().endswith('true\n555\ntrue\n0\ntrue'), run.stdout[-1000:]
         assert not fixture.errors, fixture.errors
         point = [q for q in fixture.queries if 'NULL constraint_id' in q]
         assert all("pg_namespace.nspname='public'" in q or "pg_namespace.nspname='empty'" in q for q in point)
@@ -162,8 +166,8 @@ SELECT estimated_live_bytes=0 AND live_entries=0 AS cleared_ok FROM postgres_cat
         broad = [i for i, q in enumerate(point) if 'AND relname=' not in q]
         assert len(broad) == 2 and broad[0] >= 550, broad
         assert all('AND relname=' in q for q in point[:broad[0]])
-        print(json.dumps({'case_variants': True, 'enum_composite': True, 'retry': True,
-                          'point_lookups': len(point)-len(broad), 'complete_enumeration_tables': 554,
+        print(json.dumps({'dropped_attribute_primary_key': True, 'case_variants': True, 'enum_composite': True, 'retry': True,
+                          'point_lookups': len(point)-len(broad), 'complete_enumeration_tables': 555,
                           'estimated_retained_limit_bytes': 16777216, 'clear_releases_entries': True}))
     finally:
         fixture.shutdown()

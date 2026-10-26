@@ -171,11 +171,15 @@ void SetPostgresNullByteReplacement(ClientContext &context, SetScope scope, Valu
 	}
 }
 
-namespace duckdb { void RegisterPostgresGuardedCRUD(ExtensionLoader &loader); }
+namespace duckdb {
+void RegisterPostgresGuardedCRUD(ExtensionLoader &loader);
+void RegisterPostgresDDLMetadata(ExtensionLoader &loader);
+}
 
 static void LoadInternal(ExtensionLoader &loader) {
 #ifdef POSTGRES_GUARDED_CRUD
     RegisterPostgresGuardedCRUD(loader);
+    RegisterPostgresDDLMetadata(loader);
 #endif
 	loader.RegisterFunction(TableFunction("postgres_catalog_cache_stats", {}, ScanPostgresCatalogCacheStats,
 	                                      BindPostgresCatalogCacheStats, InitPostgresCatalogCacheStats));

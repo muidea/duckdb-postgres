@@ -76,8 +76,8 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             throw IOException("guarded identity unavailable");
         string identity_text = PQgetvalue(identity.get(),0,1);
         if ((d.product == POSTGRES_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("Greenplum") != string::npos)) ||
-            (d.product == GREENPLUM_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("(Greenplum Database 6.") == string::npos)) ||
-            (d.product == KINGBASE_CRUD_PRODUCT && identity_text.find("KingbaseES V008R006") != 0))
+            (d.product == GREENPLUM_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("(Greenplum Database ") == string::npos)) ||
+            (d.product == KINGBASE_CRUD_PRODUCT && identity_text.find("KingbaseES ") != 0))
             throw IOException("guarded source product mismatch");
         version = d.product == POSTGRES_CRUD_PRODUCT ? string(PQgetvalue(identity.get(),0,0)) : identity_text;
         if (d.execute && version != d.version) throw IOException("guarded backend changed");

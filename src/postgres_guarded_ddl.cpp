@@ -24,8 +24,30 @@ static unique_ptr<FunctionData> BindContract(ClientContext &ctx,
                                              TableFunctionBindInput &in,
                                              vector<LogicalType> &types,
                                              vector<string> &names,
-                                             int32_t contract) {
-  auto intent = GuardedDDLIntent::Bind(in.inputs, false, contract);
+                                             int32_t contract, bool scoped = false) {
+  auto inputs = in.inputs;
+  string owner;
+  if (scoped) {
+    if (inputs.size() != 5 || inputs[4].IsNull() || inputs[4].type().id() != LogicalTypeId::STRUCT)
+      throw BinderException("DDL owner scope is unavailable");
+    const auto &types = StructType::GetChildTypes(inputs[4].type());
+    const auto &fields = StructValue::GetChildren(inputs[4]);
+    if (types.size() < 6 || types[5].first != "owner")
+      throw BinderException("DDL owner scope is unavailable");
+    owner = GuardedDDLIntent::Text(fields[5]);
+    if (!GuardedDDLIntent::Name(owner))
+      throw BinderException("DDL owner scope is unavailable");
+    child_list_t<Value> values;
+    for (idx_t i = 0; i < types.size(); i++)
+      values.emplace_back(types[i].first, i == 5 ? Value("") : fields[i]);
+    inputs[4] = Value::STRUCT(std::move(values));
+  }
+  auto intent = GuardedDDLIntent::Bind(inputs, false, contract);
+  if (scoped) {
+    if (intent.action != "drop_index" && intent.action != "rename_index" && intent.action != "reindex")
+      throw BinderException("DDL owner scope is unavailable");
+    intent.owner = owner;
+  }
   auto db = DatabaseManager::Get(ctx).GetDatabase(
       ctx, GuardedDDLIntent::Text(in.inputs[0]));
   if (!db || db->GetCatalog().GetCatalogType() != "postgres")
@@ -53,6 +75,15 @@ static unique_ptr<FunctionData> BindV4(ClientContext &ctx,
                                        vector<LogicalType> &types,
                                        vector<string> &names) {
   return BindContract(ctx, in, types, names, 4);
+}
+static unique_ptr<FunctionData> BindScopedV2(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+  return BindContract(ctx, in, types, names, 2, true);
+}
+static unique_ptr<FunctionData> BindScopedV3(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+  return BindContract(ctx, in, types, names, 3, true);
+}
+static unique_ptr<FunctionData> BindScopedV4(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+  return BindContract(ctx, in, types, names, 4, true);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
 static Result Wrap(PGresult *r) { return Result(r, PQclear); }
@@ -104,7 +135,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
       error = "0A000";
       throw IOException("DDL source not certified");
     }
-    auto begin = Wrap(PQexec(raw, "BEGIN"));
+    auto begin = Wrap(PQexec(raw, d.intent.owner.empty() ? "BEGIN" : "BEGIN ISOLATION LEVEL READ COMMITTED"));
     if (!OK(begin.get()))
       throw IOException("DDL begin failed");
     transaction = true;
@@ -124,6 +155,36 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     }
     if (ctx.IsInterrupted())
       throw InterruptException();
+    string scoped_index_oid;
+    if (!d.intent.owner.empty()) {
+      // The persisted application scope is authority only after acquiring the
+      // expected table's lock and checking index ownership on this exact source
+      // transaction. A renamed/replaced index cannot escape that table scope.
+      const auto target = KeywordHelper::WriteQuoted(d.intent.schema, '"') + "." +
+                          KeywordHelper::WriteQuoted(d.intent.owner, '"');
+      auto lock = Wrap(PQexec(raw, ("LOCK TABLE ONLY " + target + " IN ACCESS EXCLUSIVE MODE").c_str()));
+      if (!OK(lock.get())) {
+        error = ErrorState(lock.get());
+        throw IOException("DDL owner lock unavailable");
+      }
+      const char *values[] = {d.intent.schema.c_str(), d.intent.name.c_str(), d.intent.owner.c_str()};
+      auto owner = Wrap(PQexecParams(raw,
+          "SELECT i.oid::text FROM pg_catalog.pg_class i "
+          "JOIN pg_catalog.pg_namespace n ON n.oid=i.relnamespace "
+          "JOIN pg_catalog.pg_index x ON x.indexrelid=i.oid "
+          "JOIN pg_catalog.pg_class t ON t.oid=x.indrelid "
+          "WHERE n.nspname=$1 AND i.relname=$2 AND i.relkind='i' "
+          "AND t.relnamespace=n.oid AND t.relname=$3 AND t.relkind='r' "
+          "AND t.relpersistence='p' AND NOT t.relispartition "
+          "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h "
+          "WHERE h.inhrelid=t.oid OR h.inhparent=t.oid)",
+          3, nullptr, values, nullptr, nullptr, 0));
+      if (!owner || PQresultStatus(owner.get()) != PGRES_TUPLES_OK || PQntuples(owner.get()) != 1) {
+        error = "0A000";
+        throw IOException("DDL index owner changed");
+      }
+      scoped_index_oid = PQgetvalue(owner.get(), 0, 0);
+    }
     if (d.intent.contract_version >= 3) {
       // Read-only scope check; no extra source object lock. EXECUTION_NAME
       // still applies to the subsequent native utility statement.
@@ -170,6 +231,28 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
       error = ErrorState(result.get());
       throw IOException("DDL execution failed");
     }
+    if (!scoped_index_oid.empty()) {
+      // A table lock alone does not prevent ALTER INDEX RENAME. The native
+      // utility holds its index lock until commit. Prove after execution that
+      // it acted on the exact observed index; otherwise roll back, never commit
+      // a concurrent same-name replacement on a different table.
+      const string after_name = d.intent.action == "rename_index" ? d.intent.new_name : d.intent.name;
+      const char *values[] = {scoped_index_oid.c_str(), d.intent.schema.c_str(), after_name.c_str(), d.intent.owner.c_str()};
+      const char *sql = d.intent.action == "drop_index"
+          ? "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid=$1::oid)"
+          : "SELECT 1 FROM pg_catalog.pg_class i "
+            "JOIN pg_catalog.pg_namespace n ON n.oid=i.relnamespace "
+            "JOIN pg_catalog.pg_index x ON x.indexrelid=i.oid "
+            "JOIN pg_catalog.pg_class t ON t.oid=x.indrelid "
+            "WHERE i.oid=$1::oid AND n.nspname=$2 AND i.relname=$3 "
+            "AND t.relnamespace=n.oid AND t.relname=$4";
+      auto verified = Wrap(PQexecParams(raw, sql, d.intent.action == "drop_index" ? 1 : 4,
+                                        nullptr, values, nullptr, nullptr, 0));
+      if (!verified || PQresultStatus(verified.get()) != PGRES_TUPLES_OK || PQntuples(verified.get()) != 1) {
+        error = "0A000";
+        throw IOException("DDL index execution scope changed");
+      }
+    }
     stage = "source_commit";
     commit_sent = true;
     auto commit = Wrap(PQexec(raw, "COMMIT"));
@@ -207,6 +290,18 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 } // namespace
 void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
+  loader.RegisterFunction(TableFunction(
+      "postgres_guarded_ddl_scoped_v2",
+      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
+      Scan, BindScopedV2, Init));
+  loader.RegisterFunction(TableFunction(
+      "postgres_guarded_ddl_scoped_v3",
+      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
+      Scan, BindScopedV3, Init));
+  loader.RegisterFunction(TableFunction(
+      "postgres_guarded_ddl_scoped_v4",
+      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
+      Scan, BindScopedV4, Init));
   loader.RegisterFunction(TableFunction(
       "postgres_guarded_ddl_v2",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,

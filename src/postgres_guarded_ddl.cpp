@@ -18,9 +18,9 @@ struct State : GlobalTableFunctionState {
 static unique_ptr<GlobalTableFunctionState> Init(ClientContext &, TableFunctionInitInput &) {
 	return make_uniq<State>();
 }
-static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types,
-									 vector<string> &names) {
-	auto intent = GuardedDDLIntent::Bind(in.inputs, false);
+static unique_ptr<FunctionData> BindContract(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types,
+									 vector<string> &names, int32_t contract) {
+	auto intent = GuardedDDLIntent::Bind(in.inputs, false, contract);
 	auto db = DatabaseManager::Get(ctx).GetDatabase(ctx, GuardedDDLIntent::Text(in.inputs[0]));
 	if (!db || db->GetCatalog().GetCatalogType() != "postgres")
 		throw BinderException("DDL catalog is unavailable");
@@ -28,6 +28,12 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
 	types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 			 LogicalType::BIGINT};
 	return make_uniq<Data>(db->GetCatalog().Cast<PostgresCatalog>(), std::move(intent));
+}
+static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+	return BindContract(ctx, in, types, names, 2);
+}
+static unique_ptr<FunctionData> BindV3(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+	return BindContract(ctx, in, types, names, 3);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
 static Result Wrap(PGresult *r) { return Result(r, PQclear); }
@@ -81,6 +87,21 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 		}
 		if (ctx.IsInterrupted())
 			throw InterruptException();
+		if (d.intent.action == "rename_table" || d.intent.action == "add_column" || d.intent.action == "rename_column" || d.intent.action == "rename_index") {
+			// Read-only scope check; no extra source object lock. EXECUTION_NAME
+			// still applies to the subsequent native utility statement.
+			const char *values[] = {d.intent.schema.c_str(), d.intent.name.c_str()};
+			const string kind = d.intent.action == "rename_index" ? "i" : "r";
+			auto shape = Wrap(PQexecParams(raw,
+				("SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+				 "WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind='" + kind + "' AND c.relpersistence='p' "
+				 "AND NOT c.relispartition AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid=c.oid OR h.inhparent=c.oid)").c_str(),
+				2, nullptr, values, nullptr, nullptr, 0));
+			if (!shape || PQresultStatus(shape.get()) != PGRES_TUPLES_OK || PQntuples(shape.get()) != 1) {
+				error = "0A000";
+				throw IOException("DDL ordinary object scope is unavailable");
+			}
+		}
 		stage = "source_execute";
 		sent = true;
 		auto result = Wrap(PQexec(raw, d.intent.sql.c_str()));
@@ -128,5 +149,9 @@ void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
 		"postgres_guarded_ddl_v2",
 		{LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
 		Scan, Bind, Init));
+	loader.RegisterFunction(TableFunction(
+		"postgres_guarded_ddl_v3",
+		{LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
+		Scan, BindV3, Init));
 }
 } // namespace duckdb

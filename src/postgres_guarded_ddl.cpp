@@ -127,11 +127,9 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         PQntuples(identity.get()) != 1)
       throw IOException("DDL source identity unavailable");
     string version = PQgetvalue(identity.get(), 0, 1);
-    int major = std::stoi(PQgetvalue(identity.get(), 0, 2)) / 10000;
     if (string(PQgetvalue(identity.get(), 0, 0)) != d.intent.database ||
         version.find("PostgreSQL ") != 0 ||
-        version.find("Greenplum") != string::npos ||
-        (major != 12 && major != 17)) {
+        version.find("Greenplum") != string::npos) {
       error = "0A000";
       throw IOException("DDL source not certified");
     }

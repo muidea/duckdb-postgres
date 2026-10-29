@@ -40,7 +40,11 @@ PGresult *PQfqeExecutePortal(PGconn *conn)
         return NULL;
     entry = pqAllocCmdQueueEntry(conn);
     if (!entry) return NULL;
-    if (pqPutMsgStart('E', conn) < 0 || pqPuts("fqe_guarded_portal", conn) < 0 ||
+    /* Execute does not send RowDescription. Request it in this query cycle
+     * so libpq can decode DataRows using the pinned portal's real descriptor. */
+    if (pqPutMsgStart('D', conn) < 0 || pqPutc('P', conn) < 0 ||
+        pqPuts("fqe_guarded_portal", conn) < 0 || pqPutMsgEnd(conn) < 0 ||
+        pqPutMsgStart('E', conn) < 0 || pqPuts("fqe_guarded_portal", conn) < 0 ||
         pqPutInt(0, 4, conn) < 0 || pqPutMsgEnd(conn) < 0 ||
         pqPutMsgStart('C', conn) < 0 || pqPutc('P', conn) < 0 ||
         pqPuts("fqe_guarded_portal", conn) < 0 || pqPutMsgEnd(conn) < 0 ||

@@ -19,6 +19,9 @@ struct Data : TableFunctionData {
     string schema, table, expected, version, sql, product;
     vector<Value> params;
     bool execute;
+    bool returning = false;
+    string returning_name;
+    int64_t returning_oid=0;
     Data(PostgresCatalog &c, bool exec) : catalog(c), execute(exec) {}
 };
 struct State : GlobalTableFunctionState { bool done = false; };
@@ -35,6 +38,13 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
     data->product = function_name.substr(0, function_name.find('_'));
     if (data->product != POSTGRES_CRUD_PRODUCT && data->product != GREENPLUM_CRUD_PRODUCT && data->product != KINGBASE_CRUD_PRODUCT)
         throw BinderException("guarded source contract unavailable");
+    data->returning = function_name == "postgres_guarded_insert_returning_v1";
+    if (data->returning) {
+        auto name=in.named_parameters.find("returning_name"), oid=in.named_parameters.find("returning_oid");
+        if (name==in.named_parameters.end() || oid==in.named_parameters.end() || name->second.IsNull() || oid->second.IsNull()) throw BinderException("returned column unavailable");
+        data->returning_name=name->second.GetValue<string>(); data->returning_oid=oid->second.GetValue<int64_t>();
+        if (data->returning_name.empty() || (data->returning_oid!=20 && data->returning_oid!=21 && data->returning_oid!=23 && data->returning_oid!=2950)) throw BinderException("returned type unsupported");
+    }
     data->schema = in.inputs[1].GetValue<string>(); data->table = in.inputs[2].GetValue<string>();
     if (data->execute) {
         data->expected = in.inputs[3].GetValue<string>(); data->version = in.inputs[4].GetValue<string>();
@@ -45,6 +55,7 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
     names = {"status", "affected_rows", "sqlstate", "stage", "version", "descriptor"};
     types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR,
              LogicalType::VARCHAR, LogicalType::VARCHAR};
+    if(data->returning) { names.push_back("returned_rows");types.push_back(LogicalType::VARCHAR); }
     return std::move(data);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
@@ -59,6 +70,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     auto &d = in.bind_data->Cast<Data>();
     string status = "CONFIRMED_NOT_EXECUTED", error, stage = "source_metadata", version, descriptor;
     int64_t affected = -1;
+    string returned_rows="[";
     bool sent = false, finished = false;
     PostgresPoolConnection pooled;
     unique_ptr<GuardedCRUDDeadline> deadline;
@@ -96,7 +108,8 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             for (auto &v : d.params) { text.push_back(v.IsNull() ? "" : v.ToString()); if (text.back().find('\0') != string::npos) throw IOException("unsupported text encoding"); }
             vector<const char *> params; for (idx_t i=0;i<d.params.size();i++) params.push_back(d.params[i].IsNull()?nullptr:text[i].c_str());
             auto bound = Wrap(PQfqeBindPortal(raw, params.size(), params.data()));
-            if (!OK(bound.get()) || PQnfields(bound.get()) != 0) { error = ErrorState(bound.get()); throw IOException("guarded portal unavailable"); }
+            if (!OK(bound.get()) || PQnfields(bound.get()) != (d.returning?1:0) ||
+                (d.returning && (string(PQfname(bound.get(),0))!=d.returning_name || PQftype(bound.get(),0)!=d.returning_oid))) { error = ErrorState(bound.get()); throw IOException("guarded portal unavailable"); }
         }
         const char *args[] = {d.schema.c_str(),d.table.c_str()};
         auto metadata_sql = PostgresFamilyMetadataSQL(d.product);
@@ -109,9 +122,25 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             if (ctx.IsInterrupted()) { error = "57014"; throw InterruptException(); }
             stage = "source_execute"; sent = true;
             auto result = Wrap(PQfqeExecutePortal(raw));
-            if (!OK(result.get())) { error = ErrorState(result.get()); throw IOException("guarded execution failed"); }
+            if (!result || PQresultStatus(result.get())!=(d.returning?PGRES_TUPLES_OK:PGRES_COMMAND_OK)) { error = ErrorState(result.get()); throw IOException("guarded execution failed"); }
             auto rows = PQcmdTuples(result.get()); if (!rows || !*rows) throw IOException("guarded count unavailable");
             affected = std::stoll(rows);
+            if (d.returning) {
+                if (PQnfields(result.get())!=1 || PQntuples(result.get())!=affected || affected<0 || affected>4096) { error="54000";throw IOException("returned rows exceed contract"); }
+                for(int i=0;i<PQntuples(result.get());i++) {
+                    if(i) returned_rows+=",";
+                    returned_rows+="[";
+                    if(PQgetisnull(result.get(),i,0)) returned_rows+="null";
+                    else {
+                        auto len=PQgetlength(result.get(),i,0);if(len<0 || len>64) { error="54000";throw IOException("returned identifier too large"); }
+                        string value(PQgetvalue(result.get(),i,0),len);
+                        if(value.find_first_not_of("0123456789abcdefABCDEF-")!=string::npos) { error="22021";throw IOException("returned identifier encoding unsupported"); }
+                        returned_rows+="\""+value+"\"";
+                    }
+                    returned_rows+="]";
+                }
+                returned_rows+="]";
+            }
             stage = "source_commit"; status = "COMMIT_STATUS_UNKNOWN"; finished = true;
             auto commit = Wrap(PQexec(raw,"COMMIT"));
             if (!OK(commit.get()) || string(PQcmdStatus(commit.get())) != "COMMIT") {
@@ -140,9 +169,16 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     out.SetCardinality(1);
     out.SetValue(0,0,Value(status)); out.SetValue(1,0,Value::BIGINT(affected)); out.SetValue(2,0,Value(error));
     out.SetValue(3,0,Value(stage)); out.SetValue(4,0,Value(version)); out.SetValue(5,0,Value(descriptor));
+    if(d.returning) out.SetValue(6,0,Value(status=="COMMITTED"?returned_rows:""));
 }
 }
 void RegisterPostgresGuardedCRUD(ExtensionLoader &loader) {
+    TableFunction returning("postgres_guarded_insert_returning_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
+    returning.named_parameters["params"]=LogicalType::ANY;
+    returning.named_parameters["returning_name"]=LogicalType::VARCHAR;
+    returning.named_parameters["returning_oid"]=LogicalType::BIGINT;
+    loader.RegisterFunction(returning);
+
     for (auto &product : {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
         TableFunction metadata(string(product) + "_crud_metadata_v1",{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
         loader.RegisterFunction(metadata);

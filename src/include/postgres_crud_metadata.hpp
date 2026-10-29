@@ -56,6 +56,15 @@ static const char *FQE_POSTGRES_METADATA_SQL = R"FQEMETA(SELECT pg_catalog.left(
  'ordinary_default', COALESCE(pg_catalog.left(ad.adbin::pg_catalog.text,
  pg_catalog.length('{CONST :consttype ' || a.atttypid::pg_catalog.text || ' '))=
  '{CONST :consttype ' || a.atttypid::pg_catalog.text || ' ',false),
+ 'sequence_default', COALESCE((SELECT seq.oid::pg_catalog.text || ':' || seq.xmin::pg_catalog.text
+ FROM pg_catalog.pg_class seq
+ WHERE seq.relkind='S' AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d
+ WHERE d.classid='pg_catalog.pg_attrdef'::pg_catalog.regclass AND d.objid=ad.oid
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass AND d.refobjid=seq.oid AND d.deptype='n')
+ AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d
+ WHERE d.classid='pg_catalog.pg_class'::pg_catalog.regclass AND d.objid=seq.oid
+ AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass AND d.refobjid=a.attrelid AND d.refobjsubid=a.attnum AND d.deptype='a')
+ AND pg_catalog.pg_get_expr(ad.adbin,ad.adrelid)='nextval(' || pg_catalog.quote_literal(seq.oid::pg_catalog.regclass::pg_catalog.text) || '::regclass)' LIMIT 1),''),
  'identity', a.attidentity, 'generated', a.attgenerated, 'version', a.xmin::pg_catalog.text,
  'collation_oid', a.attcollation::pg_catalog.int8, 'collation_schema', COALESCE(cn.nspname,''),
  'collation_name', COALESCE(co.collname,''), 'collation_version', COALESCE(co.xmin::pg_catalog.text,''),

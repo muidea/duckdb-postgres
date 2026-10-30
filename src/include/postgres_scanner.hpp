@@ -92,7 +92,7 @@ public:
 
 class PostgresClearCacheFunction : public TableFunction {
 public:
-	PostgresClearCacheFunction();
+	explicit PostgresClearCacheFunction(bool scoped = false);
 
 	static void ClearCacheOnSetting(ClientContext &context, SetScope scope, Value &parameter);
 	static void ClearPostgresCaches(ClientContext &context);

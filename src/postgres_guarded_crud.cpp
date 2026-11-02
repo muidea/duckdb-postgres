@@ -1,4 +1,5 @@
 #include "duckdb.hpp"
+#include "guarded_source_error.hpp"
 #include "guarded_crud_deadline.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -19,6 +20,7 @@ struct Data : TableFunctionData {
     string schema, table, expected, version, sql, product;
     vector<Value> params;
     bool execute;
+    bool diagnostics = false;
     bool returning = false;
     string returning_name;
     int64_t returning_oid=0;
@@ -56,6 +58,9 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
     types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR,
              LogicalType::VARCHAR, LogicalType::VARCHAR};
     if(data->returning) { names.push_back("returned_rows");types.push_back(LogicalType::VARCHAR); }
+    auto diagnostics = in.named_parameters.find("source_diagnostics");
+    data->diagnostics = diagnostics != in.named_parameters.end() && !diagnostics->second.IsNull() && diagnostics->second.GetValue<bool>();
+    if (data->diagnostics) { names.push_back("source_error"); types.push_back(LogicalType::VARCHAR); }
     return std::move(data);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
@@ -65,10 +70,21 @@ static string ErrorState(PGresult *r) {
     auto state = r ? PQresultErrorField(r, PG_DIAG_SQLSTATE) : nullptr;
     return state && strlen(state) == 5 ? state : "08006";
 }
+static GuardedSourceError SourceError(PGresult *result) {
+    GuardedSourceError e;
+    if (!result || !PQresultErrorField(result, PG_DIAG_SQLSTATE)) return e;
+    auto field = [&](int code) { auto value=PQresultErrorField(result, code); return value ? string(value) : string(); };
+    e.product="postgres"; e.state=field(PG_DIAG_SQLSTATE); e.code=e.state;
+    e.message=field(PG_DIAG_MESSAGE_PRIMARY); e.detail=field(PG_DIAG_MESSAGE_DETAIL); e.hint=field(PG_DIAG_MESSAGE_HINT);
+    e.schema=field(PG_DIAG_SCHEMA_NAME); e.table=field(PG_DIAG_TABLE_NAME);
+    e.column=field(PG_DIAG_COLUMN_NAME); e.constraint=field(PG_DIAG_CONSTRAINT_NAME);
+    return e;
+}
 static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     auto &state = in.global_state->Cast<State>(); if (state.done) return; state.done = true;
     auto &d = in.bind_data->Cast<Data>();
     string status = "CONFIRMED_NOT_EXECUTED", error, stage = "source_metadata", version, descriptor;
+    GuardedSourceError source;
     int64_t affected = -1;
     string returned_rows="[";
     bool sent = false, finished = false;
@@ -81,11 +97,13 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         deadline = make_uniq<GuardedCRUDDeadline>(ctx, PQsocket(raw));
         // No state from a query transaction is borrowed or committed.
         if (PQtransactionStatus(raw) != PQTRANS_IDLE) throw IOException("guarded PostgreSQL connection is not idle");
-        auto reset = Wrap(PQexec(raw, "DISCARD ALL")); if (!OK(reset.get())) throw IOException("guarded reset failed");
+        auto reset = Wrap(PQexec(raw, "DISCARD ALL")); if (!OK(reset.get())) { source = SourceError(reset.get()); error = ErrorState(reset.get()); throw IOException("guarded reset failed"); }
         auto identity = Wrap(PQexec(raw, "SELECT current_setting('server_version'),version(),current_setting('transaction_read_only')"));
         if (!identity || PQresultStatus(identity.get()) != PGRES_TUPLES_OK || PQntuples(identity.get()) != 1 ||
-            string(PQgetvalue(identity.get(),0,2)) != "off")
+            string(PQgetvalue(identity.get(),0,2)) != "off") {
+            source = SourceError(identity.get());
             throw IOException("guarded identity unavailable");
+        }
         string identity_text = PQgetvalue(identity.get(),0,1);
         if ((d.product == POSTGRES_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("Greenplum") != string::npos)) ||
             (d.product == GREENPLUM_CRUD_PRODUCT && (identity_text.find("PostgreSQL ") != 0 || identity_text.find("(Greenplum Database ") == string::npos)) ||
@@ -93,28 +111,28 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             throw IOException("guarded source product mismatch");
         version = d.product == POSTGRES_CRUD_PRODUCT ? string(PQgetvalue(identity.get(),0,0)) : identity_text;
         if (d.execute && version != d.version) throw IOException("guarded backend changed");
-        auto begin = Wrap(PQexec(raw, "BEGIN ISOLATION LEVEL READ COMMITTED")); if (!OK(begin.get())) throw IOException("guarded begin failed");
+        auto begin = Wrap(PQexec(raw, "BEGIN ISOLATION LEVEL READ COMMITTED")); if (!OK(begin.get())) { source = SourceError(begin.get()); error = ErrorState(begin.get()); throw IOException("guarded begin failed"); }
         string settings_sql = "SET LOCAL search_path=pg_catalog; SET LOCAL statement_timeout='25s'; SET LOCAL lock_timeout='5s'; SET LOCAL timezone='UTC'; SET LOCAL client_encoding='UTF8'; SET LOCAL datestyle='ISO,YMD'; SET LOCAL standard_conforming_strings=on";
         if (d.product != GREENPLUM_CRUD_PRODUCT) settings_sql += "; SET LOCAL row_security=on";
         auto settings = Wrap(PQexec(raw, settings_sql.c_str()));
-        if (!OK(settings.get())) throw IOException("guarded settings failed");
+        if (!OK(settings.get())) { source = SourceError(settings.get()); error = ErrorState(settings.get()); throw IOException("guarded settings failed"); }
         if (d.execute) {
             auto lock = Wrap(PQexec(raw, ("LOCK TABLE ONLY " + KeywordHelper::WriteQuoted(d.schema, '"') + "." + KeywordHelper::WriteQuoted(d.table, '"') + " IN SHARE UPDATE EXCLUSIVE MODE").c_str()));
-            if (!OK(lock.get())) { error = ErrorState(lock.get()); throw IOException("guarded lock failed"); }
+            if (!OK(lock.get())) { source = SourceError(lock.get()); error = ErrorState(lock.get()); throw IOException("guarded lock failed"); }
             stage = "source_prepare";
             auto prepare = Wrap(PQprepare(raw, "fqe_guarded_statement", d.sql.c_str(), 0, nullptr));
-            if (!OK(prepare.get())) { error = ErrorState(prepare.get()); throw IOException("guarded prepare failed"); }
+            if (!OK(prepare.get())) { source = SourceError(prepare.get()); error = ErrorState(prepare.get()); throw IOException("guarded prepare failed"); }
             vector<string> text; text.reserve(d.params.size());
             for (auto &v : d.params) { text.push_back(v.IsNull() ? "" : v.ToString()); if (text.back().find('\0') != string::npos) throw IOException("unsupported text encoding"); }
             vector<const char *> params; for (idx_t i=0;i<d.params.size();i++) params.push_back(d.params[i].IsNull()?nullptr:text[i].c_str());
             auto bound = Wrap(PQfqeBindPortal(raw, params.size(), params.data()));
             if (!OK(bound.get()) || PQnfields(bound.get()) != (d.returning?1:0) ||
-                (d.returning && (string(PQfname(bound.get(),0))!=d.returning_name || PQftype(bound.get(),0)!=d.returning_oid))) { error = ErrorState(bound.get()); throw IOException("guarded portal unavailable"); }
+                (d.returning && (string(PQfname(bound.get(),0))!=d.returning_name || PQftype(bound.get(),0)!=d.returning_oid))) { source = SourceError(bound.get()); error = ErrorState(bound.get()); throw IOException("guarded portal unavailable"); }
         }
         const char *args[] = {d.schema.c_str(),d.table.c_str()};
         auto metadata_sql = PostgresFamilyMetadataSQL(d.product);
         auto meta = Wrap(PQexecParams(raw,metadata_sql.c_str(),2,nullptr,args,nullptr,nullptr,0));
-        if (!meta || PQresultStatus(meta.get()) != PGRES_TUPLES_OK || PQntuples(meta.get()) != 1 || PQgetisnull(meta.get(),0,0)) throw IOException("guarded descriptor unavailable");
+        if (!meta || PQresultStatus(meta.get()) != PGRES_TUPLES_OK || PQntuples(meta.get()) != 1 || PQgetisnull(meta.get(),0,0)) { source=SourceError(meta.get()); throw IOException("guarded descriptor unavailable"); }
         descriptor = PQgetvalue(meta.get(),0,0);
         if (d.execute) {
             stage = "source_descriptor";
@@ -122,7 +140,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             if (ctx.IsInterrupted()) { error = "57014"; throw InterruptException(); }
             stage = "source_execute"; sent = true;
             auto result = Wrap(PQfqeExecutePortal(raw));
-            if (!result || PQresultStatus(result.get())!=(d.returning?PGRES_TUPLES_OK:PGRES_COMMAND_OK)) { error = ErrorState(result.get()); throw IOException("guarded execution failed"); }
+            if (!result || PQresultStatus(result.get())!=(d.returning?PGRES_TUPLES_OK:PGRES_COMMAND_OK)) { source = SourceError(result.get()); error = ErrorState(result.get()); throw IOException("guarded execution failed"); }
             auto rows = PQcmdTuples(result.get()); if (!rows || !*rows) throw IOException("guarded count unavailable");
             affected = std::stoll(rows);
             if (d.returning) {
@@ -144,7 +162,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
             stage = "source_commit"; status = "COMMIT_STATUS_UNKNOWN"; finished = true;
             auto commit = Wrap(PQexec(raw,"COMMIT"));
             if (!OK(commit.get()) || string(PQcmdStatus(commit.get())) != "COMMIT") {
-                error = ErrorState(commit.get());
+                source = SourceError(commit.get()); error = ErrorState(commit.get());
             } else { status = "COMMITTED"; stage.clear(); }
         }
         if (!d.execute) {
@@ -167,6 +185,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         con.Close();
     }
     out.SetCardinality(1);
+    if (d.diagnostics) out.SetValue(6 + (d.returning ? 1 : 0), 0, Value(source.JSON()));
     out.SetValue(0,0,Value(status)); out.SetValue(1,0,Value::BIGINT(affected)); out.SetValue(2,0,Value(error));
     out.SetValue(3,0,Value(stage)); out.SetValue(4,0,Value(version)); out.SetValue(5,0,Value(descriptor));
     if(d.returning) out.SetValue(6,0,Value(status=="COMMITTED"?returned_rows:""));
@@ -177,12 +196,15 @@ void RegisterPostgresGuardedCRUD(ExtensionLoader &loader) {
     returning.named_parameters["params"]=LogicalType::ANY;
     returning.named_parameters["returning_name"]=LogicalType::VARCHAR;
     returning.named_parameters["returning_oid"]=LogicalType::BIGINT;
+    returning.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
     loader.RegisterFunction(returning);
 
     for (auto &product : {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
         TableFunction metadata(string(product) + "_crud_metadata_v1",{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
+        metadata.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
         loader.RegisterFunction(metadata);
         TableFunction exec(string(product) + "_guarded_mutation_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
+        exec.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
         exec.named_parameters["params"] = LogicalType::ANY;
         loader.RegisterFunction(exec);
     }

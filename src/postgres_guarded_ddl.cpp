@@ -2,6 +2,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "guarded_crud_deadline.hpp"
+#include "guarded_source_error.hpp"
 #include "guarded_ddl_intent.hpp"
 #include "storage/postgres_catalog.hpp"
 
@@ -10,6 +11,7 @@ namespace {
 struct Data : TableFunctionData {
   PostgresCatalog &catalog;
   GuardedDDLIntent intent;
+    bool diagnostics = false;
   Data(PostgresCatalog &c, GuardedDDLIntent d)
       : catalog(c), intent(std::move(d)) {}
 };
@@ -55,8 +57,11 @@ static unique_ptr<FunctionData> BindContract(ClientContext &ctx,
   names = {"operation_id", "status", "sqlstate", "stage", "warning_count"};
   types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
            LogicalType::VARCHAR, LogicalType::BIGINT};
-  return make_uniq<Data>(db->GetCatalog().Cast<PostgresCatalog>(),
-                         std::move(intent));
+  auto data=make_uniq<Data>(db->GetCatalog().Cast<PostgresCatalog>(), std::move(intent));
+  auto diag=in.named_parameters.find("source_diagnostics");
+  data->diagnostics=diag!=in.named_parameters.end() && !diag->second.IsNull() && diag->second.GetValue<bool>();
+  if(data->diagnostics) {names.push_back("source_error");types.push_back(LogicalType::VARCHAR);}
+  return std::move(data);
 }
 static unique_ptr<FunctionData> Bind(ClientContext &ctx,
                                      TableFunctionBindInput &in,
@@ -94,6 +99,15 @@ static string ErrorState(PGresult *r) {
   const char *s = r ? PQresultErrorField(r, PG_DIAG_SQLSTATE) : nullptr;
   return s && strlen(s) == 5 ? s : "08006";
 }
+static GuardedSourceError SourceError(PGresult *result) {
+    GuardedSourceError e;
+    if (!result || !PQresultErrorField(result, PG_DIAG_SQLSTATE)) return e;
+    auto field = [&](int code) { auto value=PQresultErrorField(result, code); return value ? string(value) : string(); };
+    e.product="postgres";e.state=field(PG_DIAG_SQLSTATE);e.code=e.state;e.message=field(PG_DIAG_MESSAGE_PRIMARY);
+    e.detail=field(PG_DIAG_MESSAGE_DETAIL);e.hint=field(PG_DIAG_MESSAGE_HINT);e.schema=field(PG_DIAG_SCHEMA_NAME);
+    e.table=field(PG_DIAG_TABLE_NAME);e.column=field(PG_DIAG_COLUMN_NAME);e.constraint=field(PG_DIAG_CONSTRAINT_NAME);
+    return e;
+}
 static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
   auto &state = in.global_state->Cast<State>();
   if (state.done)
@@ -101,6 +115,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
   state.done = true;
   auto &d = in.bind_data->Cast<Data>();
   string status = "CONFIRMED_NOT_EXECUTED", error, stage = "source_identity";
+  GuardedSourceError source;
   PostgresPoolConnection pooled;
   unique_ptr<GuardedCRUDDeadline> deadline;
   bool transaction = false, sent = false, commit_sent = false;
@@ -117,15 +132,19 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     if (PQtransactionStatus(raw) != PQTRANS_IDLE)
       throw IOException("DDL session is not idle");
     auto reset = Wrap(PQexec(raw, "DISCARD ALL"));
-    if (!OK(reset.get()))
+    if (!OK(reset.get())) {
+      source = SourceError(reset.get()); error = ErrorState(reset.get());
       throw IOException("DDL reset failed");
+    }
     auto identity = Wrap(PQexec(
         raw,
         "SELECT "
         "current_database(),version(),current_setting('server_version_num')"));
     if (!identity || PQresultStatus(identity.get()) != PGRES_TUPLES_OK ||
-        PQntuples(identity.get()) != 1)
+        PQntuples(identity.get()) != 1) {
+      source = SourceError(identity.get());
       throw IOException("DDL source identity unavailable");
+    }
     string version = PQgetvalue(identity.get(), 0, 1);
     if (string(PQgetvalue(identity.get(), 0, 0)) != d.intent.database ||
         version.find("PostgreSQL ") != 0 ||
@@ -134,8 +153,10 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
       throw IOException("DDL source not certified");
     }
     auto begin = Wrap(PQexec(raw, d.intent.owner.empty() ? "BEGIN" : "BEGIN ISOLATION LEVEL READ COMMITTED"));
-    if (!OK(begin.get()))
+    if (!OK(begin.get())) {
+      source = SourceError(begin.get()); error = ErrorState(begin.get());
       throw IOException("DDL begin failed");
+    }
     transaction = true;
     const string timeout = d.intent.action == "reindex"     ? "290s"
                            : d.intent.contract_version == 4 ? "110s"
@@ -148,7 +169,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         "standard_conforming_strings=on; SET LOCAL client_encoding='UTF8'";
     auto settings = Wrap(PQexec(raw, settingsSQL.c_str()));
     if (!OK(settings.get())) {
-      error = ErrorState(settings.get());
+      source=SourceError(settings.get()); error = ErrorState(settings.get());
       throw IOException("DDL settings failed");
     }
     if (ctx.IsInterrupted())
@@ -162,7 +183,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
                           KeywordHelper::WriteQuoted(d.intent.owner, '"');
       auto lock = Wrap(PQexec(raw, ("LOCK TABLE ONLY " + target + " IN ACCESS EXCLUSIVE MODE").c_str()));
       if (!OK(lock.get())) {
-        error = ErrorState(lock.get());
+        source=SourceError(lock.get()); error = ErrorState(lock.get());
         throw IOException("DDL owner lock unavailable");
       }
       const char *values[] = {d.intent.schema.c_str(), d.intent.name.c_str(), d.intent.owner.c_str()};
@@ -226,7 +247,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     sent = true;
     auto result = Wrap(PQexec(raw, d.intent.sql.c_str()));
     if (!OK(result.get())) {
-      error = ErrorState(result.get());
+      source=SourceError(result.get()); error = ErrorState(result.get());
       throw IOException("DDL execution failed");
     }
     if (!scoped_index_oid.empty()) {
@@ -256,7 +277,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     auto commit = Wrap(PQexec(raw, "COMMIT"));
     if (!OK(commit.get()) || string(PQcmdStatus(commit.get())) != "COMMIT" ||
         PQtransactionStatus(raw) != PQTRANS_IDLE) {
-      error = ErrorState(commit.get());
+      source=SourceError(commit.get()); error = ErrorState(commit.get());
       throw IOException("DDL commit outcome unavailable");
     }
     transaction = false;
@@ -280,6 +301,7 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     pooled.GetConnection().Close();
   }
   out.SetCardinality(1);
+  if(d.diagnostics) out.SetValue(5,0,Value(source.JSON()));
   out.SetValue(0, 0, Value(d.intent.operation));
   out.SetValue(1, 0, Value(status));
   out.SetValue(2, 0, Value(error));
@@ -288,29 +310,30 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 } // namespace
 void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
-  loader.RegisterFunction(TableFunction(
+  auto register_function = [&](TableFunction function) {function.named_parameters["source_diagnostics"]=LogicalType::BOOLEAN;loader.RegisterFunction(function);};
+  register_function(TableFunction(
       "postgres_guarded_ddl_scoped_v2",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
       Scan, BindScopedV2, Init));
-  loader.RegisterFunction(TableFunction(
+  register_function(TableFunction(
       "postgres_guarded_ddl_scoped_v3",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
       Scan, BindScopedV3, Init));
-  loader.RegisterFunction(TableFunction(
+  register_function(TableFunction(
       "postgres_guarded_ddl_scoped_v4",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
       Scan, BindScopedV4, Init));
-  loader.RegisterFunction(TableFunction(
+  register_function(TableFunction(
       "postgres_guarded_ddl_v2",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
        LogicalType::VARCHAR, LogicalType::ANY},
       Scan, Bind, Init));
-  loader.RegisterFunction(TableFunction(
+  register_function(TableFunction(
       "postgres_guarded_ddl_v3",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
        LogicalType::VARCHAR, LogicalType::ANY},
       Scan, BindV3, Init));
-  loader.RegisterFunction(TableFunction(
+  register_function(TableFunction(
       "postgres_guarded_ddl_v4",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
        LogicalType::VARCHAR, LogicalType::ANY},

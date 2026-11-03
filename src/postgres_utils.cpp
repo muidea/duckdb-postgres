@@ -144,12 +144,16 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 	} else if (pgtypename == "float8") {
 		return LogicalType::DOUBLE;
 	} else if (pgtypename == "numeric") {
-		auto width = ((type_info.type_modifier - sizeof(int32_t)) >> 16) & 0xffff;
-		auto scale = (((type_info.type_modifier - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
-		if (type_info.type_modifier == -1 || width < 0 || scale < 0 || width > 38) {
-			// fallback to double
-			postgres_type.info = PostgresTypeAnnotation::NUMERIC_AS_DOUBLE;
-			return LogicalType::DOUBLE;
+		auto modifier = type_info.type_modifier - int64_t(sizeof(int32_t));
+		auto width = (modifier >> 16) & 0xffff;
+		auto scale = ((modifier & 0x7ff) ^ 1024) - 1024;
+		if (type_info.type_modifier < int64_t(sizeof(int32_t)) || width < 1 || scale < 0 ||
+		    scale > width || width > 38) {
+			// An unbounded/wide numeric cannot fit a fixed DuckDB DECIMAL.
+			// Decode numeric_send directly to text, including inside arrays and
+			// composites. A DOUBLE fallback irreversibly rounds here.
+			postgres_type.info = PostgresTypeAnnotation::NUMERIC_AS_TEXT;
+			return LogicalType::VARCHAR_COLLATION("postgres_exact_numeric");
 		}
 		return LogicalType::DECIMAL(width, scale);
 	} else if (pgtypename == "char" || pgtypename == "bpchar") {

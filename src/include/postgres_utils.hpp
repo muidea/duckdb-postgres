@@ -25,7 +25,7 @@ struct PostgresTypeData {
 enum class PostgresTypeAnnotation {
 	STANDARD,
 	CAST_TO_VARCHAR,
-	NUMERIC_AS_DOUBLE,
+	NUMERIC_AS_TEXT,
 	CTID,
 	JSONB,
 	FIXED_LENGTH_CHAR,

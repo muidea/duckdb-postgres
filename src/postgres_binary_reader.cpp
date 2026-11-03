@@ -1,4 +1,6 @@
 #include "postgres_binary_reader.hpp"
+#include "postgres_numeric_text.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
 #include "postgres_scanner.hpp"
 
 namespace duckdb {
@@ -247,11 +249,6 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		FlatVector::GetData<float>(out_vec)[output_offset] = ReadFloat();
 		break;
 	case LogicalTypeId::DOUBLE: {
-		// this was an unbounded decimal, read params from value and cast to double
-		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_DOUBLE) {
-			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>();
-			break;
-		}
 		D_ASSERT(value_len == sizeof(double));
 		FlatVector::GetData<double>(out_vec)[output_offset] = ReadDouble();
 		break;
@@ -259,6 +256,16 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 
 	case LogicalTypeId::BLOB:
 	case LogicalTypeId::VARCHAR: {
+		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_TEXT) {
+			auto bytes = ReadString(value_len);
+			try {
+				FlatVector::GetData<string_t>(out_vec)[output_offset] =
+				    StringVector::AddString(out_vec, PostgresNumericText(bytes, value_len));
+			} catch (const std::invalid_argument &error) {
+				throw ConversionException(error.what());
+			}
+			break;
+		}
 		if (postgres_type.info == PostgresTypeAnnotation::JSONB) {
 			auto version = ReadInteger<uint8_t>();
 			value_len--;

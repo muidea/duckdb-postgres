@@ -110,7 +110,9 @@ struct PostgresStructParser {
 			                            data.ColumnCount());
 		}
 		auto &col = data.data[column_offset];
-		if (!quoted && str == "NULL") {
+		// record_out represents NULL as an unquoted empty field. The word
+		// NULL is ordinary text here (unlike PostgreSQL's array format).
+		if (!quoted && str.empty()) {
 			FlatVector::SetNull(col, row_offset, true);
 		} else {
 			FlatVector::GetData<string_t>(col)[row_offset] = StringVector::AddStringOrBlob(col, str);
@@ -152,7 +154,7 @@ struct PostgresCTIDParser {
 };
 
 template <class T>
-void ParsePostgresNested(T &parser, string_t list, char start, char end) {
+void ParsePostgresNested(T &parser, string_t list, char start, char end, bool preserve_empty = false) {
 	auto str = list.GetData();
 	auto size = list.GetSize();
 	if (size == 0 || str[0] != start || str[size - 1] != end) {
@@ -213,16 +215,17 @@ void ParsePostgresNested(T &parser, string_t list, char start, char end) {
 				break;
 			}
 			// next element
-			if (!current_string.empty() || was_quoted) {
+			if (preserve_empty || !current_string.empty() || was_quoted) {
 				parser.AddString(current_string, was_quoted);
 			}
+			was_quoted = false;
 			current_string = string();
 			break;
 		default:
 			current_string += c;
 		}
 	}
-	if (!current_string.empty() || was_quoted) {
+	if (preserve_empty || !current_string.empty() || was_quoted) {
 		parser.AddString(current_string, was_quoted);
 	}
 	parser.Finish();
@@ -233,7 +236,7 @@ void ParsePostgresList(PostgresListParser &list_parser, string_t list) {
 }
 
 void ParsePostgresStruct(PostgresStructParser &struct_parser, string_t list) {
-	ParsePostgresNested(struct_parser, list, '(', ')');
+	ParsePostgresNested(struct_parser, list, '(', ')', true);
 }
 
 void ParsePostgresCTID(PostgresCTIDParser &ctid_parser, string_t list) {
@@ -285,6 +288,7 @@ void PostgresTextReader::ConvertStruct(Vector &source, Vector &target, const Pos
 			}
 			continue;
 		}
+		struct_parser.row_offset = i;
 		ParsePostgresStruct(struct_parser, strings[i]);
 	}
 	for (idx_t c = 0; c < children.size(); c++) {

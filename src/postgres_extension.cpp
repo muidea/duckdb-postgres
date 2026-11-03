@@ -21,8 +21,31 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection_manager.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/parser/parsed_data/create_collation_info.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
+#include "postgres_numeric_key.hpp"
 
 using namespace duckdb;
+
+static void ExactNumericKey(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t value) {
+		try {
+			return StringVector::AddString(result, PostgresNumericKey(value.GetString()));
+		} catch (const std::invalid_argument &error) {
+			throw ConversionException(error.what());
+		}
+	});
+}
+
+static unique_ptr<FunctionData> BindExactNumericKey(ClientContext &, ScalarFunction &function,
+                                                   vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() != 1 || arguments[0]->return_type.id() != LogicalTypeId::VARCHAR) {
+		throw BinderException("Exact PostgreSQL numeric collation requires a string input");
+	}
+	function.arguments[0] = arguments[0]->return_type;
+	return nullptr;
+}
 
 struct PostgresCatalogCacheStatsState : public GlobalTableFunctionState {
 	bool finished = false;
@@ -178,6 +201,11 @@ void RegisterPostgresGuardedDDL(ExtensionLoader &loader);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	ScalarFunction numeric_key("postgres_exact_numeric", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                           ExactNumericKey, BindExactNumericKey);
+	numeric_key.collation_handling = FunctionCollationHandling::IGNORE_COLLATIONS;
+	CreateCollationInfo exact_numeric("postgres_exact_numeric", numeric_key, false, false);
+	loader.RegisterCollation(exact_numeric);
 #ifdef POSTGRES_GUARDED_CRUD
     RegisterPostgresGuardedCRUD(loader);
     RegisterPostgresDDLMetadata(loader);

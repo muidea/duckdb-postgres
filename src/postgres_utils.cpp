@@ -207,7 +207,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 		postgres_type.info = PostgresTypeAnnotation::GEOM_CIRCLE;
 		return LogicalType::LIST(LogicalType::DOUBLE);
 	} else {
-		if (!transaction) {
+		if (!transaction || !schema) {
 			// unsupported so fallback to varchar
 			postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
 			return LogicalType::VARCHAR;

@@ -1,0 +1,49 @@
+# name: test/sql/scanner/query_array_dimensions.test
+# description: Describe declared array dimensions without executing result SQL
+# group: [scanner]
+
+require postgres_scanner
+require-env POSTGRES_TEST_DATABASE_AVAILABLE
+
+statement ok
+ATTACH 'dbname=postgresscanner' AS array_query (TYPE POSTGRES)
+
+statement ok
+CALL postgres_execute('array_query','CREATE TABLE query_array_dimensions(i INTEGER[], m INTEGER[][], n NUMERIC[][], cube INTEGER[][][])')
+
+statement ok
+CALL postgres_execute('array_query','INSERT INTO query_array_dimensions VALUES (ARRAY[1,NULL],ARRAY[[1,NULL],[3,4]],ARRAY[[1.234567890123456789::numeric,NULL],[2.00,3]],ARRAY[[[1,2],[3,4]]]),(NULL,NULL,NULL,NULL),(''{}'',''{}'',''{}'',''{}'')')
+
+query IIII
+SELECT typeof(i),typeof(m),typeof(n),typeof(cube) FROM postgres_query('array_query','SELECT * FROM query_array_dimensions') LIMIT 1
+----
+INTEGER[]	INTEGER[][]	VARCHAR[][]	INTEGER[][][]
+
+query I
+SELECT to_json(m) FROM postgres_query('array_query','SELECT m FROM query_array_dimensions WHERE m IS NOT NULL AND cardinality(m)>0')
+----
+[[1,null],[3,4]]
+
+query I
+SELECT to_json(n) FROM postgres_query('array_query','WITH d AS (SELECT * FROM query_array_dimensions) SELECT n AS alias FROM d WHERE cardinality(n)>0')
+----
+[["1.234567890123456789",null],["2.00","3"]]
+
+query II
+SELECT typeof(v),v FROM postgres_query('array_query','SELECT ARRAY[[1,2],[3,4]] AS v')
+----
+VARCHAR	{{1,2},{3,4}}
+
+statement ok
+SET pg_array_as_varchar=true
+
+query I
+SELECT typeof(m) FROM postgres_query('array_query','SELECT m FROM query_array_dimensions') LIMIT 1
+----
+VARCHAR
+
+statement ok
+SET pg_array_as_varchar=false
+
+statement ok
+CALL postgres_execute('array_query','DROP TABLE query_array_dimensions')

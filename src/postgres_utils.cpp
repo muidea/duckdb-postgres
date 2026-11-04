@@ -188,24 +188,14 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 		point_struct.emplace_back(make_pair("x", LogicalType::DOUBLE));
 		point_struct.emplace_back(make_pair("y", LogicalType::DOUBLE));
 		return LogicalType::STRUCT(point_struct);
-	} else if (pgtypename == "line") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_LINE;
-		return LogicalType::LIST(LogicalType::DOUBLE);
-	} else if (pgtypename == "lseg") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_LINE_SEGMENT;
-		return LogicalType::LIST(LogicalType::DOUBLE);
-	} else if (pgtypename == "box") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_BOX;
-		return LogicalType::LIST(LogicalType::DOUBLE);
-	} else if (pgtypename == "path") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_PATH;
-		return LogicalType::LIST(LogicalType::DOUBLE);
-	} else if (pgtypename == "polygon") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_POLYGON;
-		return LogicalType::LIST(LogicalType::DOUBLE);
-	} else if (pgtypename == "circle") {
-		postgres_type.info = PostgresTypeAnnotation::GEOM_CIRCLE;
-		return LogicalType::LIST(LogicalType::DOUBLE);
+	} else if (pgtypename == "line" || pgtypename == "lseg" || pgtypename == "box" || pgtypename == "path" ||
+	           pgtypename == "polygon" || pgtypename == "circle") {
+		// Flattening these types into DOUBLE[] destroys the source type and,
+		// for PATH, even its open/closed flag. Let PostgreSQL format the value
+		// before COPY so attached scans, postgres_query and arrays preserve
+		// the complete source representation with an honest VARCHAR type.
+		postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
+		return LogicalType::VARCHAR;
 	} else {
 		if (!transaction || !schema) {
 			// unsupported so fallback to varchar

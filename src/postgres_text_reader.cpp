@@ -164,6 +164,7 @@ void ParsePostgresNested(T &parser, string_t list, char start, char end, bool pr
 	parser.Initialize();
 	bool quoted = false;
 	bool was_quoted = false;
+	bool preserve_quotes = false;
 	vector<char> delims;
 	string current_string;
 	for (idx_t i = 1; i < size - 1; i++) {
@@ -171,9 +172,15 @@ void ParsePostgresNested(T &parser, string_t list, char start, char end, bool pr
 		if (quoted) {
 			switch (c) {
 			case '"':
+				if (preserve_quotes) {
+					current_string += c;
+				}
 				quoted = false;
 				break;
 			case '\\':
+				if (preserve_quotes) {
+					current_string += c;
+				}
 				// escape - directly add the next character to the string
 				if (i + 1 < size) {
 					current_string += str[i + 1];
@@ -206,7 +213,15 @@ void ParsePostgresNested(T &parser, string_t list, char start, char end, bool pr
 			break;
 		case '"':
 			quoted = true;
-			was_quoted = true;
+			// Nested arrays/records are parsed again by ConvertVector. Keep
+			// their element quoting and escapes for that recursive parse;
+			// stripping now splits geometric/text elements at their commas.
+			preserve_quotes = !delims.empty();
+			if (preserve_quotes) {
+				current_string += c;
+			} else {
+				was_quoted = true;
+			}
 			break;
 		case ',':
 			if (!delims.empty()) {
@@ -350,6 +365,36 @@ void PostgresTextReader::ConvertBlob(Vector &source, Vector &target, idx_t count
 	}
 }
 
+void PostgresTextReader::ConvertInterval(Vector &source, Vector &target, idx_t count) {
+	// IntervalStyle=postgres emits explicit positive components after negative
+	// ones ("-1 mons +2 days"). DuckDB's interval parser accepts the same
+	// components without '+', but rejects that sign. Normalize only component
+	// prefixes; keep negative signs and all fractional digits untouched.
+	UnifiedVectorFormat vdata;
+	source.ToUnifiedFormat(count, vdata);
+	auto strings = UnifiedVectorFormat::GetData<string_t>(vdata);
+	Vector normalized(LogicalType::VARCHAR, count);
+	auto output = FlatVector::GetData<string_t>(normalized);
+	for (idx_t i = 0; i < count; i++) {
+		if (!vdata.validity.RowIsValid(i)) {
+			FlatVector::SetNull(normalized, i, true);
+			continue;
+		}
+		auto text = strings[i].GetString();
+		string value;
+		value.reserve(text.size());
+		for (idx_t c = 0; c < text.size(); c++) {
+			if (text[c] == '+' && (c == 0 || StringUtil::CharacterIsSpace(text[c - 1])) &&
+			    c + 1 < text.size() && StringUtil::CharacterIsDigit(text[c + 1])) {
+				continue;
+			}
+			value += text[c];
+		}
+		output[i] = StringVector::AddString(normalized, value);
+	}
+	VectorOperations::Cast(context, normalized, target, count);
+}
+
 void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count) {
 	if (source.GetType().id() != LogicalTypeId::VARCHAR) {
 		throw InternalException("Source needs to be VARCHAR");
@@ -367,6 +412,9 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
 		break;
 	case LogicalTypeId::BLOB:
 		ConvertBlob(source, target, count);
+		break;
+	case LogicalTypeId::INTERVAL:
+		ConvertInterval(source, target, count);
 		break;
 	default:
 		VectorOperations::Cast(context, source, target, count);

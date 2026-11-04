@@ -1,0 +1,67 @@
+# name: test/sql/scanner/geometric_text.test
+# description: Preserve PostgreSQL geometric source text including PATH closure
+# group: [scanner]
+
+require postgres_scanner
+require-env POSTGRES_TEST_DATABASE_AVAILABLE
+
+statement ok
+ATTACH 'dbname=postgresscanner' AS geometric_text (TYPE POSTGRES)
+
+statement ok
+CALL postgres_execute('geometric_text','CREATE TABLE geometric_text_values(i INTEGER, a LSEG, b BOX, c PATH, d POLYGON, e CIRCLE, f LINE, g PATH[])')
+
+statement ok
+CALL postgres_execute('geometric_text','INSERT INTO geometric_text_values VALUES(1,''[(1,2),(3,4)]'',''(3,4),(1,2)'',''[(1,2),(3,4)]'',''((0,0),(1,0),(0,1))'',''<(1,2),3>'',''{1,2,3}'',ARRAY[''[(1,2),(3,4)]''::path,NULL,''((1,2),(3,4))''::path]),(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL)')
+
+query IIIIII
+SELECT typeof(a),typeof(b),typeof(c),typeof(d),typeof(e),typeof(f) FROM geometric_text.geometric_text_values LIMIT 1
+----
+VARCHAR	VARCHAR	VARCHAR	VARCHAR	VARCHAR	VARCHAR
+
+query IIIIII
+SELECT a,b,c,d,e,f FROM geometric_text.geometric_text_values WHERE i=1
+----
+[(1,2),(3,4)]	(3,4),(1,2)	[(1,2),(3,4)]	((0,0),(1,0),(0,1))	<(1,2),3>	{1,2,3}
+
+query I
+SELECT to_json(g) FROM geometric_text.geometric_text_values WHERE i=1
+----
+["[(1,2),(3,4)]",null,"((1,2),(3,4))"]
+
+query I
+SELECT count(*) FROM postgres_query('geometric_text','SELECT * FROM geometric_text_values WHERE i=2') WHERE a IS NULL AND b IS NULL AND c IS NULL AND d IS NULL AND e IS NULL AND f IS NULL AND g IS NULL
+----
+1
+
+query IIIIII
+SELECT a,b,c,d,e,f FROM postgres_query('geometric_text','SELECT * FROM geometric_text_values WHERE i=1')
+----
+[(1,2),(3,4)]	(3,4),(1,2)	[(1,2),(3,4)]	((0,0),(1,0),(0,1))	<(1,2),3>	{1,2,3}
+
+statement ok
+SET pg_use_text_protocol=true
+
+query I
+SELECT to_json(g) FROM geometric_text.geometric_text_values WHERE i=1
+----
+["[(1,2),(3,4)]",null,"((1,2),(3,4))"]
+
+statement ok
+SET pg_experimental_filter_pushdown=true
+
+query I
+SELECT count(*) FROM geometric_text.geometric_text_values WHERE b='(3,4),(1,2)' AND c='[(1,2),(3,4)]'
+----
+1
+
+query I
+SELECT count(*) FROM postgres_query('geometric_text','SELECT * FROM geometric_text_values') WHERE b='(3,4),(1,2)' AND c='[(1,2),(3,4)]'
+----
+1
+
+statement ok
+SET pg_use_text_protocol=false
+
+statement ok
+CALL postgres_execute('geometric_text','DROP TABLE geometric_text_values')

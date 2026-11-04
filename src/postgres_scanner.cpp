@@ -221,6 +221,23 @@ static bool ContainsCastToVarchar(const PostgresType &type) {
 	return false;
 }
 
+static string PostgresVarcharCast(const LogicalType &type, const PostgresType &postgres_type) {
+	if (!ContainsCastToVarchar(postgres_type)) {
+		return string();
+	}
+	auto leaf = type;
+	while (leaf.id() == LogicalTypeId::LIST) {
+		auto child = ListType::GetChildType(leaf);
+		leaf = std::move(child);
+	}
+	if (leaf.id() != LogicalTypeId::VARCHAR) {
+		throw NotImplementedException("Cast to varchar not implemented for composite column type %s", type.ToString());
+	}
+	// Preserve every declared array dimension. A single ::VARCHAR[] cast is
+	// insufficient when a nested element requires its source text format.
+	return "::" + type.ToString();
+}
+
 static void PostgresInitInternal(ClientContext &context, const PostgresBindData *bind_data_p,
                                  PostgresLocalState &lstate, idx_t task_min, idx_t task_max) {
 	D_ASSERT(bind_data_p);
@@ -242,28 +259,25 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData 
 			}
 		} else {
 			col_names += KeywordHelper::WriteQuoted(bind_data->names[column_id], '"');
-			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
-				col_names += "::VARCHAR";
-			} else if (bind_data->types[column_id].id() == LogicalTypeId::LIST) {
-				if (bind_data->postgres_types[column_id].info != PostgresTypeAnnotation::STANDARD) {
-					continue;
-				}
-				if (bind_data->postgres_types[column_id].children[0].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
-					col_names += "::VARCHAR[]";
-				}
-			} else {
-				if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
-					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented for "
-					                              "composite column \"%s\" (type %s)",
-					                              bind_data->table_name, bind_data->names[column_id],
-					                              bind_data->types[column_id].ToString());
-				}
-			}
+			col_names += PostgresVarcharCast(bind_data->types[column_id], bind_data->postgres_types[column_id]);
 		}
 	}
 
+	vector<string> filter_casts(bind_data->names.size());
+	if (lstate.filters) {
+		for (auto &entry : lstate.filters->filters) {
+			auto column_id = lstate.column_ids[entry.first];
+			if (column_id == COLUMN_IDENTIFIER_ROW_ID) {
+				continue;
+			}
+			// Filter source-text values as text too, but do not inspect unused
+			// columns: unsupported composites must not break unrelated queries.
+			filter_casts[column_id] =
+			    PostgresVarcharCast(bind_data->types[column_id], bind_data->postgres_types[column_id]);
+		}
+	}
 	string filter_string =
-	    PostgresFilterPushdown::TransformFilters(lstate.column_ids, lstate.filters, bind_data->names);
+	    PostgresFilterPushdown::TransformFilters(lstate.column_ids, lstate.filters, bind_data->names, filter_casts);
 
 	string filter;
 

@@ -34,6 +34,7 @@ private:
 	void ConvertStruct(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count);
 	void ConvertCTID(Vector &source, Vector &target, idx_t count);
 	void ConvertBlob(Vector &source, Vector &target, idx_t count);
+	void ConvertInterval(Vector &source, Vector &target, idx_t count);
 
 private:
 	ClientContext &context;

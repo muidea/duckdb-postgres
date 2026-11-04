@@ -130,7 +130,8 @@ string PostgresFilterPushdown::TransformFilter(string &column_name, TableFilter 
 }
 
 string PostgresFilterPushdown::TransformFilters(const vector<column_t> &column_ids,
-                                                optional_ptr<TableFilterSet> filters, const vector<string> &names) {
+                                                optional_ptr<TableFilterSet> filters, const vector<string> &names,
+                                                const vector<string> &casts) {
 	if (!filters || filters->filters.empty()) {
 		// no filters
 		return string();
@@ -143,6 +144,7 @@ string PostgresFilterPushdown::TransformFilters(const vector<column_t> &column_i
 			column_name = "ctid";
 		} else {
 			column_name = KeywordHelper::WriteQuoted(names[column_id], '"');
+			column_name += casts[column_id];
 		}
 		auto &filter = *entry.second;
 		auto filter_text = TransformFilter(column_name, filter, column_id);

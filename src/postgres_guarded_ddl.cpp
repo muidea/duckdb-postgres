@@ -81,6 +81,12 @@ static unique_ptr<FunctionData> BindV4(ClientContext &ctx,
                                        vector<string> &names) {
   return BindContract(ctx, in, types, names, 4);
 }
+static unique_ptr<FunctionData> BindV5(ClientContext &ctx,
+                                       TableFunctionBindInput &in,
+                                       vector<LogicalType> &types,
+                                       vector<string> &names) {
+  return BindContract(ctx, in, types, names, 5);
+}
 static unique_ptr<FunctionData> BindScopedV2(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
   return BindContract(ctx, in, types, names, 2, true);
 }
@@ -311,6 +317,11 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 } // namespace
 void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
   auto register_function = [&](TableFunction function) {function.named_parameters["source_diagnostics"]=LogicalType::BOOLEAN;loader.RegisterFunction(function);};
+  register_function(TableFunction("postgres_guarded_ddl_v5",
+                                  {LogicalType::VARCHAR, LogicalType::VARCHAR,
+                                   LogicalType::VARCHAR, LogicalType::VARCHAR,
+                                   LogicalType::ANY},
+                                  Scan, BindV5, Init));
   register_function(TableFunction(
       "postgres_guarded_ddl_scoped_v2",
       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},

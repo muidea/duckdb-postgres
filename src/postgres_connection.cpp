@@ -1,10 +1,11 @@
-#include "duckdb/storage/table_storage_info.hpp"
+#include "postgres_connection.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "postgres_connection.hpp"
-#include "duckdb/common/types/uuid.hpp"
-#include "duckdb/common/shared_ptr.hpp"
-#include "duckdb/common/helper.hpp"
+#include "duckdb/storage/table_storage_info.hpp"
+#include "postgres_source_error.hpp"
 
 namespace duckdb {
 
@@ -82,8 +83,7 @@ unique_ptr<PostgresResult> PostgresConnection::TryQuery(const string &query, opt
 	auto result = PQExecute(query.c_str());
 	if (ResultHasError(result)) {
 		if (error_message) {
-			auto pg_error = result ? string(PQresultErrorMessage(result)) : string(PQerrorMessage(GetConn()));
-			*error_message = StringUtil::Format("Failed to execute query \"" + query + "\": " + pg_error);
+			*error_message = PostgresQueryErrorMessage(result, GetConn(), "source_execute", query);
 		}
 		if (result) {
 			PQclear(result);
@@ -97,7 +97,7 @@ unique_ptr<PostgresResult> PostgresConnection::Query(const string &query) {
 	string error_msg;
 	auto result = TryQuery(query, &error_msg);
 	if (!result) {
-		throw std::runtime_error(error_msg);
+		throw IOException("%s", error_msg);
 	}
 	return result;
 }
@@ -112,7 +112,7 @@ vector<unique_ptr<PostgresResult>> PostgresConnection::ExecuteQueries(const stri
 	}
 	auto res = PQsendQuery(GetConn(), queries.c_str());
 	if (res == 0) {
-		throw std::runtime_error("Failed to execute query \"" + queries + "\": " + string(PQerrorMessage(GetConn())));
+		throw IOException("%s", PostgresQueryErrorMessage(nullptr, GetConn(), "source_execute", queries));
 	}
 	vector<unique_ptr<PostgresResult>> results;
 	while (true) {
@@ -122,8 +122,7 @@ vector<unique_ptr<PostgresResult>> PostgresConnection::ExecuteQueries(const stri
 		}
 		auto result = make_uniq<PostgresResult>(res);
 		if (ResultHasError(res)) {
-			throw std::runtime_error("Failed to execute query \"" + queries +
-			                         "\": " + string(PQresultErrorMessage(res)));
+			throw IOException("%s", PostgresQueryErrorMessage(res, GetConn(), "source_execute", queries));
 		}
 		if (PQresultStatus(res) != PGRES_TUPLES_OK) {
 			continue;
@@ -134,7 +133,8 @@ vector<unique_ptr<PostgresResult>> PostgresConnection::ExecuteQueries(const stri
 }
 
 PostgresVersion PostgresConnection::GetPostgresVersion() {
-	auto result = TryQuery("SELECT version(), (SELECT COUNT(*) FROM pg_settings WHERE name LIKE 'rds%')");
+	auto result = TryQuery("SELECT version(), (SELECT COUNT(*) FROM pg_settings "
+	                       "WHERE name LIKE 'rds%')");
 	if (!result) {
 		PostgresVersion version;
 		version.type_v = PostgresInstanceType::UNKNOWN;

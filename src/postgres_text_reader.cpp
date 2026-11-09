@@ -37,7 +37,7 @@ void PostgresTextReader::BeginCopy(const string &sql) {
 		FetchNextBatch();
 	} else {
 		if (PQtransactionStatus(con.GetConn()) != PQTRANS_IDLE) {
-			throw IOException("Failed to declare Postgres cursor: %s", cursor_error);
+			throw IOException("%s", cursor_error);
 		}
 		use_cursor = false;
 		cursor_open = false;

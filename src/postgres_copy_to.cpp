@@ -1,5 +1,6 @@
 #include "postgres_connection.hpp"
 #include "postgres_binary_writer.hpp"
+#include "postgres_source_error.hpp"
 #include "postgres_text_writer.hpp"
 #include "storage/postgres_table_entry.hpp"
 
@@ -59,7 +60,7 @@ void PostgresConnection::BeginCopyTo(ClientContext &context, PostgresCopyState &
 	PostgresResult pg_res(PQExecute(query.c_str()));
 	auto result = pg_res.res;
 	if (!result || PQresultStatus(result) != PGRES_COPY_IN) {
-		throw std::runtime_error("Failed to prepare COPY \"" + query + "\": " + string(PQresultErrorMessage(result)));
+		throw IOException("%s", PostgresQueryErrorMessage(result, GetConn(), "source_execute", query));
 	}
 	if (state.format == PostgresCopyFormat::BINARY) {
 		// binary copy requires a header
@@ -108,13 +109,13 @@ void PostgresConnection::FinishCopyTo(PostgresCopyState &state) {
 	PostgresResult pg_res(PQgetResult(GetConn()));
 	auto result = pg_res.res;
 	if (!result || PQresultStatus(result) != PGRES_COMMAND_OK) {
-		string error_msg(PQresultErrorMessage(result));
-		throw std::runtime_error("Failed to copy data: " + error_msg);
+		throw IOException("%s", PostgresQueryErrorMessage(result, GetConn(), "source_execute"));
 	}
 }
 
 bool NeedsQuotes(const string &to_quote, idx_t size) {
-	// Check if the string contains list or struct specific characters, or if it's empty or starts/ends with whitespaces
+	// Check if the string contains list or struct specific characters, or if it's
+	// empty or starts/ends with whitespaces
 	if (size <= 0) {
 		// Always quote the empty string
 		return true;

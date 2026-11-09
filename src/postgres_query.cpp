@@ -1,12 +1,13 @@
 #include "duckdb.hpp"
+#include "postgres_source_error.hpp"
 
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "postgres_scanner.hpp"
-#include "duckdb/main/database_manager.hpp"
-#include "duckdb/main/attached_database.hpp"
 #include "storage/postgres_catalog.hpp"
-#include "storage/postgres_transaction.hpp"
 #include "storage/postgres_schema_entry.hpp"
+#include "storage/postgres_transaction.hpp"
 
 namespace duckdb {
 
@@ -54,21 +55,21 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 	auto prepared = PQprepare(conn, "", sql.c_str(), 0, nullptr);
 	PostgresResult prepared_wrapper(prepared);
 	if (!prepared) {
-		throw BinderException("Failed to prepare query \"%s\" (no result returned): %s", sql, PQerrorMessage(conn));
+		throw IOException("%s", PostgresQueryErrorMessage(nullptr, conn, "source_prepare", sql));
 	}
 	if (PQresultStatus(prepared) != PGRES_COMMAND_OK) {
-		throw BinderException("Failed to prepare query \"%s\": %s", sql, PQresultErrorMessage(prepared));
+		throw IOException("%s", PostgresQueryErrorMessage(prepared, conn, "source_prepare", sql));
 	}
 	// use describe_prepared
 	auto describe_prepared = PQdescribePrepared(conn, "");
 	PostgresResult describe_wrapper(describe_prepared);
 	if (!describe_prepared || PQresultStatus(describe_prepared) != PGRES_COMMAND_OK) {
-		auto extended_err = describe_prepared ? PQresultErrorMessage(describe_prepared) : PQerrorMessage(conn);
-		throw BinderException("Failed to describe prepared statement: %s", extended_err);
+		throw IOException("%s", PostgresQueryErrorMessage(describe_prepared, conn, "source_describe", sql));
 	}
 	auto nfields = PQnfields(describe_prepared);
 	if (nfields <= 0) {
-		throw BinderException("No fields returned by query \"%s\" - the query must be a SELECT statement that returns "
+		throw BinderException("No fields returned by query \"%s\" - the query must "
+		                      "be a SELECT statement that returns "
 		                      "at least one column",
 		                      sql);
 	}
@@ -77,18 +78,22 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 	// same source connection. Expressions have no reliable declared shape.
 	string fields;
 	for (idx_t c = 0; c < nfields; c++) {
-		if (c) { fields += ","; }
-		fields += "(" + to_string(c) + "," + to_string(PQftype(describe_prepared, c)) +
-		          "::oid," + to_string(PQftable(describe_prepared, c)) + "::oid," +
-		          to_string(PQftablecol(describe_prepared, c)) + ")";
+		if (c) {
+			fields += ",";
+		}
+		fields += "(" + to_string(c) + "," + to_string(PQftype(describe_prepared, c)) + "::oid," +
+		          to_string(PQftable(describe_prepared, c)) + "::oid," + to_string(PQftablecol(describe_prepared, c)) +
+		          ")";
 	}
-	auto metadata = con.Query(
-	    "SELECT f.i, t.typname, n.nspname, coalesce(a.attndims,0), CASE WHEN t.typelem<>0 AND t.typlen=-1 THEN 1 ELSE 0 END "
-	    "FROM (VALUES " + fields + ") AS f(i,type_oid,relation_oid,attribute_number) "
-	    "JOIN pg_catalog.pg_type t ON t.oid=f.type_oid "
-	    "JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace "
-	    "LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=f.relation_oid "
-	    "AND a.attnum=f.attribute_number AND NOT a.attisdropped ORDER BY f.i");
+	auto metadata = con.Query("SELECT f.i, t.typname, n.nspname, coalesce(a.attndims,0), CASE WHEN "
+	                          "t.typelem<>0 AND t.typlen=-1 THEN 1 ELSE 0 END "
+	                          "FROM (VALUES " +
+	                          fields +
+	                          ") AS f(i,type_oid,relation_oid,attribute_number) "
+	                          "JOIN pg_catalog.pg_type t ON t.oid=f.type_oid "
+	                          "JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace "
+	                          "LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=f.relation_oid "
+	                          "AND a.attnum=f.attribute_number AND NOT a.attisdropped ORDER BY f.i");
 	if (metadata->Count() != idx_t(nfields)) {
 		throw BinderException("Could not resolve all postgres_query result types");
 	}
@@ -105,7 +110,9 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 		// resolver as attached scans (including enums, domains and composites).
 		if (type_schema_name != "pg_catalog") {
 			auto schema = pg_catalog.GetSchema(context, type_schema_name, OnEntryNotFound::RETURN_NULL);
-			if (schema) { type_schema = &schema->Cast<PostgresSchemaEntry>(); }
+			if (schema) {
+				type_schema = &schema->Cast<PostgresSchemaEntry>();
+			}
 		}
 		LogicalType converted_type;
 		if (metadata->GetInt64(c, 4) != 0 && type_data.array_dimensions == 0) {

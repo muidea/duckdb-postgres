@@ -1,7 +1,8 @@
 #include "postgres_binary_reader.hpp"
-#include "postgres_numeric_text.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "postgres_numeric_text.hpp"
 #include "postgres_scanner.hpp"
+#include "postgres_source_error.hpp"
 
 namespace duckdb {
 
@@ -34,7 +35,8 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 		// read a row
 		auto tuple_count = ReadInteger<int16_t>();
 		if (tuple_count <= 0) {
-			// tuple_count of -1 signifies the file trailer (i.e. footer) - reset and skip
+			// tuple_count of -1 signifies the file trailer (i.e. footer) - reset and
+			// skip
 			Reset();
 			continue;
 		}
@@ -48,7 +50,8 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
 				// row id
 				// ctid in postgres are a composite type of (page_index, tuple_in_page)
-				// the page index is a 4-byte integer, the tuple_in_page a 2-byte integer
+				// the page index is a 4-byte integer, the tuple_in_page a 2-byte
+				// integer
 				PostgresType ctid_type;
 				ctid_type.info = PostgresTypeAnnotation::CTID;
 				ReadValue(LogicalType::BIGINT, ctid_type, out_vec, output_offset);
@@ -65,7 +68,7 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 
 bool PostgresBinaryReader::Next() {
 	Reset();
-	char *out_buffer;
+	char *out_buffer = nullptr;
 	int len = PQgetCopyData(con.GetConn(), &out_buffer, 0);
 	auto new_buffer = data_ptr_cast(out_buffer);
 
@@ -79,14 +82,29 @@ bool PostgresBinaryReader::Next() {
 				break;
 			}
 			if (PQresultStatus(final_result) != PGRES_COMMAND_OK) {
-				throw IOException("Failed to fetch header for COPY: %s", string(PQresultErrorMessage(final_result)));
+				throw IOException("%s", PostgresQueryErrorMessage(final_result, con.GetConn(), "source_fetch", bind_data.sql));
 			}
 		}
 		return false;
 	}
 
-	// len -2 is error
-	// we expect at least 2 bytes in each message for the tuple count
+	// A COPY execution failure is available in the final PGresult. Capture it
+	// before draining/cleanup instead of reducing it to PQerrorMessage text.
+	if (len == -2) {
+		string diagnostic;
+		while (auto result = PQgetResult(con.GetConn())) {
+			PostgresResult owned(result);
+			if (diagnostic.empty() && PQresultStatus(result) != PGRES_COMMAND_OK) {
+				diagnostic = PostgresQueryErrorMessage(result, con.GetConn(), "source_fetch", bind_data.sql);
+			}
+		}
+		if (diagnostic.empty()) {
+			diagnostic = PostgresQueryErrorMessage(nullptr, con.GetConn(), "source_fetch", bind_data.sql);
+		}
+		throw IOException("%s", diagnostic);
+	}
+
+		// we expect at least 2 bytes in each message for the tuple count
 	if (!new_buffer || len < sizeof(int16_t)) {
 		throw IOException("Unable to read binary COPY data from Postgres: %s", string(PQerrorMessage(con.GetConn())));
 	}
@@ -404,17 +422,20 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 			expected_dimensions++;
 		}
 		if (expected_dimensions != array_dim) {
-			throw InvalidInputException(
-			    "Expected an array with %llu dimensions, but this array has %llu dimensions. The array stored in "
-			    "Postgres does not match the schema. Postgres does not enforce that arrays match the provided "
-			    "schema but DuckDB requires this.\nSet pg_array_as_varchar=true to read the array as a varchar "
-			    "instead.",
-			    expected_dimensions, array_dim);
+			throw InvalidInputException("Expected an array with %llu dimensions, but this array has %llu "
+			                            "dimensions. The array stored in "
+			                            "Postgres does not match the schema. Postgres does not enforce that "
+			                            "arrays match the provided "
+			                            "schema but DuckDB requires this.\nSet pg_array_as_varchar=true to "
+			                            "read the array as a varchar "
+			                            "instead.",
+			                            expected_dimensions, array_dim);
 		}
 		auto dimensions = unique_ptr<uint32_t[]>(new uint32_t[array_dim]);
 		for (idx_t d = 0; d < array_dim; d++) {
 			dimensions[d] = ReadInteger<uint32_t>();
-			auto lb = ReadInteger<uint32_t>(); // index lower bounds for each dimension -- we don't need them
+			auto lb = ReadInteger<uint32_t>(); // index lower bounds for each
+			                                   // dimension -- we don't need them
 		}
 		// read the arrays recursively
 		ReadArray(type, postgres_type, out_vec, output_offset, 1, dimensions.get(), array_dim);

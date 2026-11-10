@@ -35,6 +35,7 @@ public:
 	virtual PostgresReadResult Read(DataChunk &result) = 0;
 
 protected:
+	string query;
 	PostgresConnection &con;
 	const vector<column_t> &column_ids;
 	const PostgresBindData &bind_data;

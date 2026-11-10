@@ -24,6 +24,6 @@ inline string PostgresQueryErrorMessage(PGresult *result, PGconn *connection, co
 		auto text = result ? PQresultErrorMessage(result) : (connection ? PQerrorMessage(connection) : nullptr);
 		e.message = text ? string(text) : "PostgreSQL operation failed without a source diagnostic";
 	}
-	return QuerySourceMessage(e.state.empty() ? "" : e.JSON(), e.message, stage, query);
+	return QuerySourceMessage(e.state.empty() ? "" : e.JSON(), e.message, stage, query, "postgres");
 }
 } // namespace duckdb

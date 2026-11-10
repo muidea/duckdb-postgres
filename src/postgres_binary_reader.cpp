@@ -16,6 +16,7 @@ PostgresBinaryReader::~PostgresBinaryReader() {
 }
 
 void PostgresBinaryReader::BeginCopy(const string &sql) {
+	query = sql;
 	con.BeginCopyFrom(sql, PGRES_COPY_OUT);
 	if (!Next()) {
 		throw IOException("Failed to fetch header for COPY \"%s\"", sql);
@@ -47,16 +48,26 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 		for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
 			auto col_idx = column_ids[output_idx];
 			auto &out_vec = output.data[output_idx];
-			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
-				// row id
-				// ctid in postgres are a composite type of (page_index, tuple_in_page)
-				// the page index is a 4-byte integer, the tuple_in_page a 2-byte
-				// integer
-				PostgresType ctid_type;
-				ctid_type.info = PostgresTypeAnnotation::CTID;
-				ReadValue(LogicalType::BIGINT, ctid_type, out_vec, output_offset);
-			} else {
-				ReadValue(bind_data.types[col_idx], bind_data.postgres_types[col_idx], out_vec, output_offset);
+			try {
+				if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+					// row id
+					// ctid in postgres are a composite type of (page_index,
+					// tuple_in_page) the page index is a 4-byte integer, the
+					// tuple_in_page a 2-byte integer
+					PostgresType ctid_type;
+					ctid_type.info = PostgresTypeAnnotation::CTID;
+					ReadValue(LogicalType::BIGINT, ctid_type, out_vec, output_offset);
+				} else {
+					ReadValue(bind_data.types[col_idx], bind_data.postgres_types[col_idx], out_vec, output_offset);
+				}
+			} catch (const std::exception &error) {
+				auto column = col_idx < bind_data.names.size() ? bind_data.names[col_idx] : "<rowid>";
+				auto diagnostic = QueryResultErrorMessage(error, "postgres", query, column,
+				                                          output.data[output_idx].GetType().ToString());
+				if (diagnostic.empty()) {
+					throw;
+				}
+				throw IOException("%s", diagnostic);
 			}
 		}
 		Reset();
@@ -82,7 +93,7 @@ bool PostgresBinaryReader::Next() {
 				break;
 			}
 			if (PQresultStatus(final_result) != PGRES_COMMAND_OK) {
-				throw IOException("%s", PostgresQueryErrorMessage(final_result, con.GetConn(), "source_fetch", bind_data.sql));
+				throw IOException("%s", PostgresQueryErrorMessage(final_result, con.GetConn(), "source_fetch", query));
 			}
 		}
 		return false;
@@ -95,16 +106,16 @@ bool PostgresBinaryReader::Next() {
 		while (auto result = PQgetResult(con.GetConn())) {
 			PostgresResult owned(result);
 			if (diagnostic.empty() && PQresultStatus(result) != PGRES_COMMAND_OK) {
-				diagnostic = PostgresQueryErrorMessage(result, con.GetConn(), "source_fetch", bind_data.sql);
+				diagnostic = PostgresQueryErrorMessage(result, con.GetConn(), "source_fetch", query);
 			}
 		}
 		if (diagnostic.empty()) {
-			diagnostic = PostgresQueryErrorMessage(nullptr, con.GetConn(), "source_fetch", bind_data.sql);
+			diagnostic = PostgresQueryErrorMessage(nullptr, con.GetConn(), "source_fetch", query);
 		}
 		throw IOException("%s", diagnostic);
 	}
 
-		// we expect at least 2 bytes in each message for the tuple count
+	// we expect at least 2 bytes in each message for the tuple count
 	if (!new_buffer || len < sizeof(int16_t)) {
 		throw IOException("Unable to read binary COPY data from Postgres: %s", string(PQerrorMessage(con.GetConn())));
 	}

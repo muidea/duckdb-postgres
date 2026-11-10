@@ -1,7 +1,8 @@
 #include "postgres_text_reader.hpp"
-#include "postgres_scanner.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "postgres_scanner.hpp"
+#include "query_source_error.hpp"
 
 namespace duckdb {
 
@@ -15,6 +16,7 @@ PostgresTextReader::~PostgresTextReader() {
 }
 
 void PostgresTextReader::BeginCopy(const string &sql) {
+	query = sql;
 	Reset();
 	if (!bind_data.use_cursor) {
 		result = con.Query(sql);
@@ -106,8 +108,9 @@ struct PostgresStructParser {
 
 	void AddString(const string &str, bool &quoted) {
 		if (column_offset >= data.ColumnCount()) {
-			throw InvalidInputException("Too many columns in data for parsing struct - string %s - expected %d", str,
-			                            data.ColumnCount());
+			throw InvalidInputException("Too many columns in data for parsing struct "
+			                            "- string %s - expected %d",
+			                            str, data.ColumnCount());
 		}
 		auto &col = data.data[column_offset];
 		// record_out represents NULL as an unquoted empty field. The word
@@ -384,8 +387,8 @@ void PostgresTextReader::ConvertInterval(Vector &source, Vector &target, idx_t c
 		string value;
 		value.reserve(text.size());
 		for (idx_t c = 0; c < text.size(); c++) {
-			if (text[c] == '+' && (c == 0 || StringUtil::CharacterIsSpace(text[c - 1])) &&
-			    c + 1 < text.size() && StringUtil::CharacterIsDigit(text[c + 1])) {
+			if (text[c] == '+' && (c == 0 || StringUtil::CharacterIsSpace(text[c - 1])) && c + 1 < text.size() &&
+			    StringUtil::CharacterIsDigit(text[c + 1])) {
 				continue;
 			}
 			value += text[c];
@@ -465,12 +468,22 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 
 	for (idx_t c = 0; c < output.ColumnCount(); c++) {
 		auto col_idx = column_ids[c];
-		if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
-			PostgresType ctid_type;
-			ctid_type.info = PostgresTypeAnnotation::CTID;
-			ConvertVector(scan_chunk.data[c], output.data[c], ctid_type, scan_chunk.size());
-		} else {
-			ConvertVector(scan_chunk.data[c], output.data[c], bind_data.postgres_types[c], scan_chunk.size());
+		try {
+			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+				PostgresType ctid_type;
+				ctid_type.info = PostgresTypeAnnotation::CTID;
+				ConvertVector(scan_chunk.data[c], output.data[c], ctid_type, scan_chunk.size());
+			} else {
+				ConvertVector(scan_chunk.data[c], output.data[c], bind_data.postgres_types[c], scan_chunk.size());
+			}
+		} catch (const std::exception &error) {
+			auto column = col_idx < bind_data.names.size() ? bind_data.names[col_idx] : "<rowid>";
+			auto diagnostic =
+			    QueryResultErrorMessage(error, "postgres", query, column, output.data[c].GetType().ToString());
+			if (diagnostic.empty()) {
+				throw;
+			}
+			throw IOException("%s", diagnostic);
 		}
 	}
 	output.SetCardinality(scan_chunk.size());

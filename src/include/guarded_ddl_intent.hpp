@@ -26,10 +26,12 @@ struct GuardedDDLIntent {
       return "DECIMAL(" + std::to_string(precision) + "," +
              std::to_string(scale) + ")";
     }
-    if (type == "timestamp" || type == "time") {
+    if (type == "timestamp" || type == "time" || type == "timestamptz") {
       if (length || precision < 0 || precision > 6 || scale ||
-          (mysql && type == "time"))
+          (mysql && type != "timestamp"))
         throw BinderException("DDL temporal precision is unsupported");
+      if (!mysql && type == "timestamptz")
+        return "TIMESTAMP(" + std::to_string(precision) + ") WITH TIME ZONE";
       return string(mysql            ? "DATETIME("
                     : type == "time" ? "TIME("
                                      : "TIMESTAMP(") +

@@ -23,12 +23,12 @@ static unique_ptr<GlobalTableFunctionState> Init(ClientContext &,
 static unique_ptr<FunctionData> Bind(ClientContext &ctx,
                                      TableFunctionBindInput &in,
                                      vector<LogicalType> &types,
-                                     vector<string> &names) {
+                                     vector<Identifier> &names) {
   for (auto &v : in.inputs)
     if (v.IsNull())
       throw BinderException("DDL metadata input is incomplete");
   auto db = DatabaseManager::Get(ctx).GetDatabase(
-      ctx, in.inputs[0].GetValue<string>());
+      ctx, Identifier(in.inputs[0].GetValue<string>()));
   if (!db || db->GetCatalog().GetCatalogType() != "postgres")
     throw BinderException("DDL metadata catalog is unavailable");
   auto data = make_uniq<DDLMetadataData>(

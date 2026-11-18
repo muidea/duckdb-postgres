@@ -12,7 +12,7 @@
 namespace duckdb {
 
 static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<PostgresBindData>(context);
 
 	if (input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
@@ -22,7 +22,7 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 	// look up the database to query
 	auto db_name = input.inputs[0].GetValue<string>();
 	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, db_name);
+	auto db = db_manager.GetDatabase(context, Identifier(db_name));
 	if (!db) {
 		throw BinderException("Failed to find attached database \"%s\" referenced in postgres_query", db_name);
 	}
@@ -109,7 +109,7 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 		// Built-in types need no schema load. Custom types use the same catalog
 		// resolver as attached scans (including enums, domains and composites).
 		if (type_schema_name != "pg_catalog") {
-			auto schema = pg_catalog.GetSchema(context, type_schema_name, OnEntryNotFound::RETURN_NULL);
+			auto schema = pg_catalog.GetSchema(context, Identifier(type_schema_name), OnEntryNotFound::RETURN_NULL);
 			if (schema) {
 				type_schema = &schema->Cast<PostgresSchemaEntry>();
 			}
@@ -132,7 +132,10 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 	result->SetCatalog(pg_catalog);
 	result->dsn = con.GetDSN();
 	result->types = return_types;
-	result->names = names;
+	result->names.clear();
+	for (auto &n : names) {
+		result->names.push_back(n.GetIdentifierName());
+	}
 	result->read_only = false;
 	result->SetTablePages(0);
 	result->sql = std::move(sql);
@@ -141,7 +144,9 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 
 PostgresQueryFunction::PostgresQueryFunction()
     : TableFunction("postgres_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, nullptr, PGQueryBind) {
-	named_parameters["use_transaction"] = LogicalType::BOOLEAN;
+	GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("use_transaction", LogicalType::BOOLEAN);
+	});
 	PostgresScanFunction scan_function;
 	init_global = scan_function.init_global;
 	init_local = scan_function.init_local;

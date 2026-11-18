@@ -66,15 +66,17 @@ optional_ptr<CatalogEntry> PostgresCatalogSet::ReloadEntry(PostgresTransaction &
 }
 
 void PostgresCatalogSet::DropEntry(PostgresTransaction &transaction, DropInfo &info) {
+	const auto &drop_schema = info.GetQualifiedName().Schema().GetIdentifierName();
+	const auto &drop_name = info.GetQualifiedName().Name().GetIdentifierName();
 	string drop_query = "DROP ";
 	drop_query += CatalogTypeToString(info.type) + " ";
 	if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
 		drop_query += " IF EXISTS ";
 	}
-	if (!info.schema.empty()) {
-		drop_query += KeywordHelper::WriteQuoted(info.schema, '"') + ".";
+	if (!drop_schema.empty()) {
+		drop_query += KeywordHelper::WriteQuoted(drop_schema, '"') + ".";
 	}
-	drop_query += KeywordHelper::WriteQuoted(info.name, '"');
+	drop_query += KeywordHelper::WriteQuoted(drop_name, '"');
 	if (info.cascade) {
 		drop_query += "CASCADE";
 	}
@@ -82,7 +84,7 @@ void PostgresCatalogSet::DropEntry(PostgresTransaction &transaction, DropInfo &i
 
 	// erase the entry from the catalog set
 	lock_guard<mutex> l(entry_lock);
-	entries.erase(info.name);
+	entries.erase(drop_name);
 }
 
 void PostgresCatalogSet::Scan(PostgresTransaction &transaction, const std::function<void(CatalogEntry &)> &callback) {

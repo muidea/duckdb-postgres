@@ -55,9 +55,7 @@ string PostgresUtils::TypeToString(const LogicalType &input) {
 }
 
 LogicalType GetGeometryType() {
-	auto blob_type = LogicalType(LogicalTypeId::BLOB);
-	blob_type.SetAlias("WKB_BLOB");
-	return blob_type;
+	return LogicalType(LogicalTypeId::BLOB).WithAlias("WKB_BLOB");
 }
 
 LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
@@ -207,7 +205,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 			throw InternalException("Context is destroyed!?");
 		}
 		auto entry = schema->GetEntry(CatalogTransaction(schema->ParentCatalog(), *context), CatalogType::TYPE_ENTRY,
-		                              pgtypename);
+		                              Identifier(pgtypename));
 		if (!entry) {
 			// unsupported so fallback to varchar
 			postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
@@ -250,9 +248,7 @@ LogicalType PostgresUtils::ToPostgresType(const LogicalType &input) {
 			auto &type = StructType::GetChildType(input, c);
 			new_types.push_back(make_pair(name, ToPostgresType(type)));
 		}
-		auto result = LogicalType::STRUCT(std::move(new_types));
-		result.SetAlias(input.GetAlias());
-		return result;
+		return LogicalType::STRUCT(std::move(new_types)).WithAlias(input.GetAlias());
 	}
 	case LogicalTypeId::TIMESTAMP_SEC:
 	case LogicalTypeId::TIMESTAMP_MS:

@@ -62,7 +62,7 @@ struct PostgresBinaryWriteBindData : public TableFunctionData {};
 
 unique_ptr<FunctionData> PostgresBinaryCopyFunction::PostgresBinaryWriteBind(ClientContext &context,
                                                                              CopyFunctionBindInput &input,
-                                                                             const vector<string> &names,
+                                                                             const vector<Identifier> &names,
                                                                              const vector<LogicalType> &sql_types) {
 	return make_uniq<PostgresBinaryWriteBindData>();
 }

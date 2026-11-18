@@ -21,14 +21,14 @@ struct PGExecuteBindData : public TableFunctionData {
 };
 
 static duckdb::unique_ptr<FunctionData> PGExecuteBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("Success");
 
 	// look up the database to query
 	auto db_name = input.inputs[0].GetValue<string>();
 	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, db_name);
+	auto db = db_manager.GetDatabase(context, Identifier(db_name));
 	if (!db) {
 		throw BinderException("Failed to find attached database \"%s\" referenced in postgres_query", db_name);
 	}
@@ -66,7 +66,9 @@ static void PGExecuteFunction(ClientContext &context, TableFunctionInput &data_p
 PostgresExecuteFunction::PostgresExecuteFunction()
     : TableFunction("postgres_execute", {LogicalType::VARCHAR, LogicalType::VARCHAR}, PGExecuteFunction,
                     PGExecuteBind) {
-	named_parameters["use_transaction"] = LogicalType::BOOLEAN;
+	GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("use_transaction", LogicalType::BOOLEAN);
+	});
 }
 
 } // namespace duckdb

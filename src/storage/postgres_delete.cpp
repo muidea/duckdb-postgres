@@ -1,4 +1,5 @@
 #include "storage/postgres_delete.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "storage/postgres_table_entry.hpp"
 #include "duckdb/planner/operator/logical_delete.hpp"
 #include "storage/postgres_catalog.hpp"
@@ -20,8 +21,8 @@ PostgresDelete::PostgresDelete(PhysicalPlan &physical_plan, LogicalOperator &op,
 string GetDeleteSQL(const PostgresTableEntry &table, const string &ctid_list) {
 	string result;
 	result = "DELETE FROM ";
-	result += KeywordHelper::WriteQuoted(table.schema.name, '"') + ".";
-	result += PostgresUtils::QuotePostgresIdentifier(table.name);
+	result += KeywordHelper::WriteQuoted(table.schema.name.GetIdentifierName(), '"') + ".";
+	result += PostgresUtils::QuotePostgresIdentifier(table.name.GetIdentifierName());
 	result += " WHERE ctid IN (" + ctid_list + ")";
 	return result;
 }
@@ -114,7 +115,7 @@ string PostgresDelete::GetName() const {
 
 InsertionOrderPreservingMap<string> PostgresDelete::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
-	result["Table Name"] = table.name;
+	result["Table Name"] = table.name.GetIdentifierName();
 	return result;
 }
 
@@ -129,7 +130,7 @@ PhysicalOperator &PostgresCatalog::PlanDelete(ClientContext &context, PhysicalPl
 	auto &bound_ref = op.expressions[0]->Cast<BoundReferenceExpression>();
 	PostgresCatalog::MaterializePostgresScans(plan);
 
-	auto &delete_op = planner.Make<PostgresDelete>(op, op.table, bound_ref.index);
+	auto &delete_op = planner.Make<PostgresDelete>(op, op.table, bound_ref.Index());
 	delete_op.children.push_back(plan);
 	return delete_op;
 }

@@ -31,12 +31,12 @@ static unique_ptr<GlobalTableFunctionState> Init(ClientContext &, TableFunctionI
     return make_uniq<State>();
 }
 static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput &in,
-                                    vector<LogicalType> &types, vector<string> &names) {
+                                    vector<LogicalType> &types, vector<Identifier> &names) {
     for (auto &v : in.inputs) if (v.IsNull()) throw BinderException("guarded PostgreSQL input is incomplete");
-    auto db = DatabaseManager::Get(ctx).GetDatabase(ctx, in.inputs[0].GetValue<string>());
+    auto db = DatabaseManager::Get(ctx).GetDatabase(ctx, Identifier(in.inputs[0].GetValue<string>()));
     if (!db || db->GetCatalog().GetCatalogType() != POSTGRES_CRUD_PRODUCT) throw BinderException("guarded PostgreSQL catalog unavailable");
     auto data = make_uniq<Data>(db->GetCatalog().Cast<PostgresCatalog>(), in.inputs.size() == 6);
-    auto &function_name = in.table_function.name;
+    const auto &function_name = in.table_function.GetName().GetIdentifierName();
     data->product = function_name.substr(0, function_name.find('_'));
     if (data->product != POSTGRES_CRUD_PRODUCT && data->product != GREENPLUM_CRUD_PRODUCT && data->product != KINGBASE_CRUD_PRODUCT)
         throw BinderException("guarded source contract unavailable");
@@ -193,19 +193,25 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 void RegisterPostgresGuardedCRUD(ExtensionLoader &loader) {
     TableFunction returning("postgres_guarded_insert_returning_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
-    returning.named_parameters["params"]=LogicalType::ANY;
-    returning.named_parameters["returning_name"]=LogicalType::VARCHAR;
-    returning.named_parameters["returning_oid"]=LogicalType::BIGINT;
-    returning.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
+    returning.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+        options.Add("params", LogicalType::ANY)
+               .Add("returning_name", LogicalType::VARCHAR)
+               .Add("returning_oid", LogicalType::BIGINT)
+               .Add("source_diagnostics", LogicalType::BOOLEAN);
+    });
     loader.RegisterFunction(returning);
 
     for (auto &product : {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
-        TableFunction metadata(string(product) + "_crud_metadata_v1",{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
-        metadata.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
+        TableFunction metadata(Identifier(string(product) + "_crud_metadata_v1"),{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
+        metadata.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+            options.Add("source_diagnostics", LogicalType::BOOLEAN);
+        });
         loader.RegisterFunction(metadata);
-        TableFunction exec(string(product) + "_guarded_mutation_v1",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
-        exec.named_parameters["source_diagnostics"] = LogicalType::BOOLEAN;
-        exec.named_parameters["params"] = LogicalType::ANY;
+        TableFunction exec(Identifier(string(product) + "_guarded_mutation_v1"),vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
+        exec.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+            options.Add("source_diagnostics", LogicalType::BOOLEAN)
+                   .Add("params", LogicalType::ANY);
+        });
         loader.RegisterFunction(exec);
     }
 }

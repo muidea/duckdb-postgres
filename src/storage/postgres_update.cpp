@@ -1,4 +1,5 @@
 #include "storage/postgres_update.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "storage/postgres_table_entry.hpp"
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "storage/postgres_catalog.hpp"
@@ -60,8 +61,8 @@ string CreateUpdateTable(const string &name, PostgresTableEntry &table, const ve
 string GetUpdateSQL(const string &name, PostgresTableEntry &table, const vector<PhysicalIndex> &index) {
 	string result;
 	result = "UPDATE ";
-	result += KeywordHelper::WriteQuoted(table.schema.name, '"') + ".";
-	result += KeywordHelper::WriteQuoted(table.name, '"');
+	result += KeywordHelper::WriteQuoted(table.schema.name.GetIdentifierName(), '"') + ".";
+	result += KeywordHelper::WriteQuoted(table.name.GetIdentifierName(), '"');
 	result += " SET ";
 	for (idx_t i = 0; i < index.size(); i++) {
 		if (i > 0) {
@@ -76,7 +77,7 @@ string GetUpdateSQL(const string &name, PostgresTableEntry &table, const vector<
 	}
 	result += " FROM " + PostgresUtils::QuotePostgresIdentifier(name);
 	result += " WHERE ";
-	result += KeywordHelper::WriteQuoted(table.name, '"');
+	result += KeywordHelper::WriteQuoted(table.name.GetIdentifierName(), '"');
 	result += ".ctid=__page_id_string::TID";
 	return result;
 }
@@ -119,13 +120,13 @@ SinkResultType PostgresUpdate::Sink(ExecutionContext &context, DataChunk &chunk,
 
 		D_ASSERT(expressions[i]->GetExpressionType() == ExpressionType::BOUND_REF);
 		auto &binding = expressions[i]->Cast<BoundReferenceExpression>();
-		gstate.insert_chunk.data[i].Reference(chunk.data[binding.index]);
+		gstate.insert_chunk.data[i].Reference(chunk.data[binding.Index()]);
 	}
 	// convert our row ids back into ctids
 	auto &row_identifiers = chunk.data[chunk.ColumnCount() - 1];
 	auto &ctid_vector = gstate.insert_chunk.data[gstate.insert_chunk.ColumnCount() - 1];
-	auto row_data = FlatVector::GetData<row_t>(row_identifiers);
-	auto varchar_data = FlatVector::GetData<string_t>(ctid_vector);
+	auto row_data = FlatVector::GetDataMutable<row_t>(row_identifiers);
+	auto varchar_data = FlatVector::GetDataMutable<string_t>(ctid_vector);
 
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		// extract the ctid from the row id
@@ -195,7 +196,7 @@ string PostgresUpdate::GetName() const {
 
 InsertionOrderPreservingMap<string> PostgresUpdate::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
-	result["Table Name"] = table.name;
+	result["Table Name"] = table.name.GetIdentifierName();
 	return result;
 }
 

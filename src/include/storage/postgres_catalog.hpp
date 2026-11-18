@@ -10,6 +10,16 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/operator/logical_create_table.hpp"
+#include "duckdb/planner/operator/logical_delete.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/storage/database_size.hpp"
 #include "postgres_connection.hpp"
 #include "postgres_catalog_cache.hpp"
 #include <memory>
@@ -44,8 +54,8 @@ public:
 	string GetCatalogType() override {
 		return "postgres";
 	}
-	string GetDefaultSchema() const override {
-		return default_schema.empty() ? "public" : default_schema;
+	optional<Identifier> GetDefaultSchema() const override {
+		return Identifier(default_schema.empty() ? "public" : default_schema);
 	}
 
 	static string GetConnectionString(ClientContext &context, const string &attach_path, string secret_name);

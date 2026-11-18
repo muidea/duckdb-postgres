@@ -35,7 +35,7 @@ void PostgresSchemaSet::LoadEntries(PostgresTransaction &transaction) {
 	for (idx_t row = 0; row < rows; row++) {
 		auto schema_name = result->GetString(row, 1);
 		CreateSchemaInfo info;
-		info.schema = schema_name;
+		info.SetSchema(Identifier(schema_name));
 		info.internal = PostgresSchemaEntry::SchemaIsInternal(schema_name);
 		auto schema = make_shared_ptr<PostgresSchemaEntry>(catalog, info);
 		CreateEntry(transaction, std::move(schema));
@@ -47,11 +47,12 @@ optional_ptr<CatalogEntry> PostgresSchemaSet::CreateSchema(PostgresTransaction &
 	if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 		create_sql += " IF NOT EXISTS";
 	}
-	create_sql += KeywordHelper::WriteQuoted(info.schema, '"');
+	create_sql += KeywordHelper::WriteQuoted(info.SchemaName().GetIdentifierName(), '"');
 	transaction.Query(create_sql);
 	auto info_copy = info.Copy();
-	info.internal = PostgresSchemaEntry::SchemaIsInternal(info_copy->schema);
-	auto schema_entry = make_shared_ptr<PostgresSchemaEntry>(catalog, info_copy->Cast<CreateSchemaInfo>());
+	auto &copy_schema = info_copy->Cast<CreateSchemaInfo>();
+	copy_schema.internal = PostgresSchemaEntry::SchemaIsInternal(copy_schema.SchemaName().GetIdentifierName());
+	auto schema_entry = make_shared_ptr<PostgresSchemaEntry>(catalog, copy_schema);
 	return CreateEntry(transaction, std::move(schema_entry));
 }
 

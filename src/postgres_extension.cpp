@@ -38,12 +38,12 @@ static void ExactNumericKey(DataChunk &args, ExpressionState &, Vector &result) 
 	});
 }
 
-static unique_ptr<FunctionData> BindExactNumericKey(ClientContext &, ScalarFunction &function,
-                                                   vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 1 || arguments[0]->return_type.id() != LogicalTypeId::VARCHAR) {
+static unique_ptr<FunctionData> BindExactNumericKey(BindScalarFunctionInput &input) {
+	auto &arguments = input.GetArguments();
+	if (arguments.size() != 1 || arguments[0]->GetReturnType().id() != LogicalTypeId::VARCHAR) {
 		throw BinderException("Exact PostgreSQL numeric collation requires a string input");
 	}
-	function.arguments[0] = arguments[0]->return_type;
+	input.GetBoundFunction().GetArguments()[0] = arguments[0]->GetReturnType();
 	return nullptr;
 }
 
@@ -52,7 +52,7 @@ struct PostgresCatalogCacheStatsState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> BindPostgresCatalogCacheStats(ClientContext &context, TableFunctionBindInput &input,
-                                                              vector<LogicalType> &types, vector<string> &names) {
+                                                              vector<LogicalType> &types, vector<Identifier> &names) {
 	names = {"estimated_live_bytes", "estimated_retained_bytes", "live_entries", "estimated_peak_bytes",
 	         "uncached_loads"};
 	types = vector<LogicalType>(names.size(), LogicalType::UBIGINT);
@@ -201,10 +201,10 @@ void RegisterPostgresGuardedDDL(ExtensionLoader &loader);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	ScalarFunction numeric_key("postgres_exact_numeric", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	ScalarFunction numeric_key(Identifier("postgres_exact_numeric"), {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                           ExactNumericKey, BindExactNumericKey);
-	numeric_key.collation_handling = FunctionCollationHandling::IGNORE_COLLATIONS;
-	CreateCollationInfo exact_numeric("postgres_exact_numeric", numeric_key, false, false);
+	numeric_key.SetCollationHandling(FunctionCollationHandling::IGNORE_COLLATIONS);
+	CreateCollationInfo exact_numeric(Identifier("postgres_exact_numeric"), numeric_key, false, false);
 	loader.RegisterCollation(exact_numeric);
 #ifdef POSTGRES_GUARDED_CRUD
     RegisterPostgresGuardedCRUD(loader);

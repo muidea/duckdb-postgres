@@ -1,5 +1,7 @@
 #include "postgres_binary_reader.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "postgres_numeric_text.hpp"
 #include "postgres_scanner.hpp"
 #include "postgres_source_error.hpp"
@@ -198,13 +200,13 @@ void PostgresBinaryReader::ReadGeometry(const LogicalType &type, const PostgresT
 	default:
 		throw InternalException("Unsupported type for ReadGeometry");
 	}
-	auto list_entries = FlatVector::GetData<list_entry_t>(out_vec);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(out_vec);
 	auto child_offset = ListVector::GetListSize(out_vec);
 	ListVector::Reserve(out_vec, child_offset + element_count);
 	list_entries[output_offset].offset = child_offset;
 	list_entries[output_offset].length = element_count;
-	auto &child_vector = ListVector::GetEntry(out_vec);
-	auto child_data = FlatVector::GetData<double>(child_vector);
+	auto &child_vector = ListVector::GetChildMutable(out_vec);
+	auto child_data = FlatVector::GetDataMutable<double>(child_vector);
 	for (idx_t i = 0; i < element_count; i++) {
 		child_data[child_offset + i] = ReadDouble();
 	}
@@ -214,7 +216,7 @@ void PostgresBinaryReader::ReadGeometry(const LogicalType &type, const PostgresT
 void PostgresBinaryReader::ReadArray(const LogicalType &type, const PostgresType &postgres_type, Vector &out_vec,
                                      idx_t output_offset, uint32_t current_count, uint32_t dimensions[],
                                      uint32_t ndim) {
-	auto list_entries = FlatVector::GetData<list_entry_t>(out_vec);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(out_vec);
 	auto child_offset = ListVector::GetListSize(out_vec);
 	auto child_dimension = dimensions[0];
 	auto child_count = current_count * child_dimension;
@@ -227,7 +229,7 @@ void PostgresBinaryReader::ReadArray(const LogicalType &type, const PostgresType
 		current_offset += child_dimension;
 	}
 	ListVector::Reserve(out_vec, child_offset + child_count);
-	auto &child_vec = ListVector::GetEntry(out_vec);
+	auto &child_vec = ListVector::GetChildMutable(out_vec);
 	auto &child_type = ListType::GetChildType(type);
 	auto &child_pg_type = postgres_type.children[0];
 	if (ndim > 1) {
@@ -252,34 +254,34 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 	switch (type.id()) {
 	case LogicalTypeId::SMALLINT:
 		D_ASSERT(value_len == sizeof(int16_t));
-		FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadInteger<int16_t>();
+		FlatVector::GetDataMutable<int16_t>(out_vec)[output_offset] = ReadInteger<int16_t>();
 		break;
 	case LogicalTypeId::INTEGER:
 		D_ASSERT(value_len == sizeof(int32_t));
-		FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadInteger<int32_t>();
+		FlatVector::GetDataMutable<int32_t>(out_vec)[output_offset] = ReadInteger<int32_t>();
 		break;
 	case LogicalTypeId::UINTEGER:
 		D_ASSERT(value_len == sizeof(uint32_t));
-		FlatVector::GetData<uint32_t>(out_vec)[output_offset] = ReadInteger<uint32_t>();
+		FlatVector::GetDataMutable<uint32_t>(out_vec)[output_offset] = ReadInteger<uint32_t>();
 		break;
 	case LogicalTypeId::BIGINT:
 		if (postgres_type.info == PostgresTypeAnnotation::CTID) {
 			D_ASSERT(value_len == 6);
 			int64_t page_index = ReadInteger<int32_t>();
 			int64_t row_in_page = ReadInteger<int16_t>();
-			FlatVector::GetData<int64_t>(out_vec)[output_offset] = (page_index << 16LL) + row_in_page;
+			FlatVector::GetDataMutable<int64_t>(out_vec)[output_offset] = (page_index << 16LL) + row_in_page;
 			return;
 		}
 		D_ASSERT(value_len == sizeof(int64_t));
-		FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadInteger<int64_t>();
+		FlatVector::GetDataMutable<int64_t>(out_vec)[output_offset] = ReadInteger<int64_t>();
 		break;
 	case LogicalTypeId::FLOAT:
 		D_ASSERT(value_len == sizeof(float));
-		FlatVector::GetData<float>(out_vec)[output_offset] = ReadFloat();
+		FlatVector::GetDataMutable<float>(out_vec)[output_offset] = ReadFloat();
 		break;
 	case LogicalTypeId::DOUBLE: {
 		D_ASSERT(value_len == sizeof(double));
-		FlatVector::GetData<double>(out_vec)[output_offset] = ReadDouble();
+		FlatVector::GetDataMutable<double>(out_vec)[output_offset] = ReadDouble();
 		break;
 	}
 
@@ -288,7 +290,7 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_TEXT) {
 			auto bytes = ReadString(value_len);
 			try {
-				FlatVector::GetData<string_t>(out_vec)[output_offset] =
+				FlatVector::GetDataMutable<string_t>(out_vec)[output_offset] =
 				    StringVector::AddString(out_vec, PostgresNumericText(bytes, value_len));
 			} catch (const std::invalid_argument &error) {
 				throw ConversionException(error.what());
@@ -309,12 +311,12 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 				value_len--;
 			}
 		}
-		FlatVector::GetData<string_t>(out_vec)[output_offset] = StringVector::AddStringOrBlob(out_vec, str, value_len);
+		FlatVector::GetDataMutable<string_t>(out_vec)[output_offset] = StringVector::AddStringOrBlob(out_vec, str, value_len);
 		break;
 	}
 	case LogicalTypeId::BOOLEAN:
 		D_ASSERT(value_len == sizeof(bool));
-		FlatVector::GetData<bool>(out_vec)[output_offset] = ReadBoolean();
+		FlatVector::GetDataMutable<bool>(out_vec)[output_offset] = ReadBoolean();
 		break;
 	case LogicalTypeId::DECIMAL: {
 		if (value_len < sizeof(uint16_t) * 4) {
@@ -322,16 +324,16 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		}
 		switch (type.InternalType()) {
 		case PhysicalType::INT16:
-			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>();
+			FlatVector::GetDataMutable<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>();
 			break;
 		case PhysicalType::INT32:
-			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>();
+			FlatVector::GetDataMutable<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>();
 			break;
 		case PhysicalType::INT64:
-			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>();
+			FlatVector::GetDataMutable<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>();
 			break;
 		case PhysicalType::INT128:
-			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>();
+			FlatVector::GetDataMutable<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>();
 			break;
 		default:
 			throw InvalidInputException("Unsupported decimal storage type");
@@ -341,24 +343,24 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 
 	case LogicalTypeId::DATE: {
 		D_ASSERT(value_len == sizeof(int32_t));
-		auto out_ptr = FlatVector::GetData<date_t>(out_vec);
+		auto out_ptr = FlatVector::GetDataMutable<date_t>(out_vec);
 		out_ptr[output_offset] = ReadDate();
 		break;
 	}
 	case LogicalTypeId::TIME: {
 		D_ASSERT(value_len == sizeof(int64_t));
-		FlatVector::GetData<dtime_t>(out_vec)[output_offset] = ReadTime();
+		FlatVector::GetDataMutable<dtime_t>(out_vec)[output_offset] = ReadTime();
 		break;
 	}
 	case LogicalTypeId::TIME_TZ: {
 		D_ASSERT(value_len == sizeof(int64_t) + sizeof(int32_t));
-		FlatVector::GetData<dtime_tz_t>(out_vec)[output_offset] = ReadTimeTZ();
+		FlatVector::GetDataMutable<dtime_tz_t>(out_vec)[output_offset] = ReadTimeTZ();
 		break;
 	}
 	case LogicalTypeId::TIMESTAMP_TZ:
 	case LogicalTypeId::TIMESTAMP: {
 		D_ASSERT(value_len == sizeof(int64_t));
-		FlatVector::GetData<timestamp_t>(out_vec)[output_offset] = ReadTimestamp();
+		FlatVector::GetDataMutable<timestamp_t>(out_vec)[output_offset] = ReadTimestamp();
 		break;
 	}
 	case LogicalTypeId::ENUM: {
@@ -369,14 +371,14 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		}
 		switch (type.InternalType()) {
 		case PhysicalType::UINT8:
-			FlatVector::GetData<uint8_t>(out_vec)[output_offset] = (uint8_t)offset;
+			FlatVector::GetDataMutable<uint8_t>(out_vec)[output_offset] = (uint8_t)offset;
 			break;
 		case PhysicalType::UINT16:
-			FlatVector::GetData<uint16_t>(out_vec)[output_offset] = (uint16_t)offset;
+			FlatVector::GetDataMutable<uint16_t>(out_vec)[output_offset] = (uint16_t)offset;
 			break;
 
 		case PhysicalType::UINT32:
-			FlatVector::GetData<uint32_t>(out_vec)[output_offset] = (uint32_t)offset;
+			FlatVector::GetDataMutable<uint32_t>(out_vec)[output_offset] = (uint32_t)offset;
 			break;
 
 		default:
@@ -387,16 +389,16 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		break;
 	}
 	case LogicalTypeId::INTERVAL: {
-		FlatVector::GetData<interval_t>(out_vec)[output_offset] = ReadInterval();
+		FlatVector::GetDataMutable<interval_t>(out_vec)[output_offset] = ReadInterval();
 		break;
 	}
 	case LogicalTypeId::UUID: {
 		D_ASSERT(value_len == 2 * sizeof(int64_t));
-		FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadUUID();
+		FlatVector::GetDataMutable<hugeint_t>(out_vec)[output_offset] = ReadUUID();
 		break;
 	}
 	case LogicalTypeId::LIST: {
-		auto &list_entry = FlatVector::GetData<list_entry_t>(out_vec)[output_offset];
+		auto &list_entry = FlatVector::GetDataMutable<list_entry_t>(out_vec)[output_offset];
 		auto child_offset = ListVector::GetListSize(out_vec);
 
 		if (value_len < 1) {
@@ -456,8 +458,8 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 		auto &child_entries = StructVector::GetEntries(out_vec);
 		if (postgres_type.info == PostgresTypeAnnotation::GEOM_POINT) {
 			D_ASSERT(value_len == sizeof(double) * 2);
-			FlatVector::GetData<double>(*child_entries[0])[output_offset] = ReadDouble();
-			FlatVector::GetData<double>(*child_entries[1])[output_offset] = ReadDouble();
+			FlatVector::GetDataMutable<double>(child_entries[0])[output_offset] = ReadDouble();
+			FlatVector::GetDataMutable<double>(child_entries[1])[output_offset] = ReadDouble();
 			break;
 		}
 		auto entry_count = ReadInteger<uint32_t>();
@@ -466,7 +468,7 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
 			                        entry_count);
 		}
 		for (idx_t c = 0; c < entry_count; c++) {
-			auto &child = *child_entries[c];
+			auto &child = child_entries[c];
 			auto value_oid = ReadInteger<uint32_t>();
 			ReadValue(child.GetType(), postgres_type.children[c], child, output_offset);
 		}

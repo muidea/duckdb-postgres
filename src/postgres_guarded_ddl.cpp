@@ -25,7 +25,7 @@ static unique_ptr<GlobalTableFunctionState> Init(ClientContext &,
 static unique_ptr<FunctionData> BindContract(ClientContext &ctx,
                                              TableFunctionBindInput &in,
                                              vector<LogicalType> &types,
-                                             vector<string> &names,
+                                             vector<Identifier> &names,
                                              int32_t contract, bool scoped = false) {
   auto inputs = in.inputs;
   string owner;
@@ -51,7 +51,7 @@ static unique_ptr<FunctionData> BindContract(ClientContext &ctx,
     intent.owner = owner;
   }
   auto db = DatabaseManager::Get(ctx).GetDatabase(
-      ctx, GuardedDDLIntent::Text(in.inputs[0]));
+      ctx, Identifier(GuardedDDLIntent::Text(in.inputs[0])));
   if (!db || db->GetCatalog().GetCatalogType() != "postgres")
     throw BinderException("DDL catalog is unavailable");
   names = {"operation_id", "status", "sqlstate", "stage", "warning_count"};
@@ -66,34 +66,34 @@ static unique_ptr<FunctionData> BindContract(ClientContext &ctx,
 static unique_ptr<FunctionData> Bind(ClientContext &ctx,
                                      TableFunctionBindInput &in,
                                      vector<LogicalType> &types,
-                                     vector<string> &names) {
+                                     vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 2);
 }
 static unique_ptr<FunctionData> BindV3(ClientContext &ctx,
                                        TableFunctionBindInput &in,
                                        vector<LogicalType> &types,
-                                       vector<string> &names) {
+                                       vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 3);
 }
 static unique_ptr<FunctionData> BindV4(ClientContext &ctx,
                                        TableFunctionBindInput &in,
                                        vector<LogicalType> &types,
-                                       vector<string> &names) {
+                                       vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 4);
 }
 static unique_ptr<FunctionData> BindV5(ClientContext &ctx,
                                        TableFunctionBindInput &in,
                                        vector<LogicalType> &types,
-                                       vector<string> &names) {
+                                       vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 5);
 }
-static unique_ptr<FunctionData> BindScopedV2(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+static unique_ptr<FunctionData> BindScopedV2(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 2, true);
 }
-static unique_ptr<FunctionData> BindScopedV3(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+static unique_ptr<FunctionData> BindScopedV3(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 3, true);
 }
-static unique_ptr<FunctionData> BindScopedV4(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<string> &names) {
+static unique_ptr<FunctionData> BindScopedV4(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
   return BindContract(ctx, in, types, names, 4, true);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
@@ -316,7 +316,12 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 } // namespace
 void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
-  auto register_function = [&](TableFunction function) {function.named_parameters["source_diagnostics"]=LogicalType::BOOLEAN;loader.RegisterFunction(function);};
+  auto register_function = [&](TableFunction function) {
+    function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+      options.Add("source_diagnostics", LogicalType::BOOLEAN);
+    });
+    loader.RegisterFunction(function);
+  };
   register_function(TableFunction("postgres_guarded_ddl_v5",
                                   {LogicalType::VARCHAR, LogicalType::VARCHAR,
                                    LogicalType::VARCHAR, LogicalType::VARCHAR,

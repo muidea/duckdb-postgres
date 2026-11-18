@@ -7,6 +7,7 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 #include "postgres_filter_pushdown.hpp"
 #include "postgres_scanner.hpp"
 #include "postgres_result.hpp"
@@ -183,7 +184,7 @@ void PostgresBindData::SetTable(PostgresTableEntry &table) {
 }
 
 static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<PostgresBindData>(context);
 
 	bind_data->dsn = input.inputs[0].GetValue<string>();
@@ -265,8 +266,8 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData 
 
 	vector<string> filter_casts(bind_data->names.size());
 	if (lstate.filters) {
-		for (auto &entry : lstate.filters->filters) {
-			auto column_id = lstate.column_ids[entry.first];
+		for (auto &entry : *lstate.filters) {
+			auto column_id = lstate.column_ids[entry.GetIndex().GetIndexUnsafe()];
 			if (column_id == COLUMN_IDENTIFIER_ROW_ID) {
 				continue;
 			}
@@ -561,20 +562,21 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
 }
 
 static void PostgresScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
-                                  const TableFunction &function) {
+                                  const BoundTableFunction &function) {
 	throw NotImplementedException("PostgresScanSerialize");
 }
 
-static unique_ptr<FunctionData> PostgresScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+static unique_ptr<FunctionData> PostgresScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	throw NotImplementedException("PostgresScanDeserialize");
 }
 
-static BindInfo PostgresGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
+static optional_ptr<TableCatalogEntry> PostgresGetTableEntry(optional_ptr<const FunctionData> bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<PostgresBindData>();
-	auto table = bind_data.GetTable();
-	BindInfo info(ScanType::EXTERNAL);
-	info.table = bind_data.GetTable().get();
-	return info;
+	return bind_data.GetTable().get();
+}
+
+static BindInfo PostgresGetBindInfo(TableFunctionGetBindInfoInput &input) {
+	return BindInfo(ScanType::EXTERNAL);
 }
 
 PostgresScanFunction::PostgresScanFunction()
@@ -587,6 +589,7 @@ PostgresScanFunction::PostgresScanFunction()
 	cardinality = PostgresScanCardinality;
 	table_scan_progress = PostgresScanProgress;
 	get_bind_info = PostgresGetBindInfo;
+	get_table_entry = PostgresGetTableEntry;
 	projection_pushdown = true;
 	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;
 }
@@ -601,6 +604,7 @@ PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
 	cardinality = PostgresScanCardinality;
 	table_scan_progress = PostgresScanProgress;
 	get_bind_info = PostgresGetBindInfo;
+	get_table_entry = PostgresGetTableEntry;
 	projection_pushdown = true;
 	filter_pushdown = true;
 	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;

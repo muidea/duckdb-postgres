@@ -19,7 +19,7 @@ struct AttachFunctionData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> AttachBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 
 	auto result = make_uniq<AttachFunctionData>();
 	result->dsn = input.inputs[0].GetValue<string>();
@@ -94,12 +94,13 @@ ORDER BY relname;
 
 PostgresAttachFunction::PostgresAttachFunction()
     : TableFunction("postgres_attach", {LogicalType::VARCHAR}, AttachFunction, AttachBind) {
-	named_parameters["overwrite"] = LogicalType::BOOLEAN;
-	named_parameters["filter_pushdown"] = LogicalType::BOOLEAN;
-
-	named_parameters["source_schema"] = LogicalType::VARCHAR;
-	named_parameters["sink_schema"] = LogicalType::VARCHAR;
-	named_parameters["suffix"] = LogicalType::VARCHAR;
+	GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("overwrite", LogicalType::BOOLEAN)
+		    .Add("filter_pushdown", LogicalType::BOOLEAN)
+		    .Add("source_schema", LogicalType::VARCHAR)
+		    .Add("sink_schema", LogicalType::VARCHAR)
+		    .Add("suffix", LogicalType::VARCHAR);
+	});
 }
 
 } // namespace duckdb

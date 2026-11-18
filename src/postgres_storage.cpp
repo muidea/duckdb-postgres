@@ -1,9 +1,11 @@
 #include "duckdb.hpp"
 
 #include "postgres_storage.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "storage/postgres_catalog.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/storage/storage_extension.hpp"
 #include "storage/postgres_transaction_manager.hpp"
 
 namespace duckdb {

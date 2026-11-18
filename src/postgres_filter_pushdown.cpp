@@ -1,26 +1,14 @@
 #include "postgres_filter_pushdown.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
-#include "duckdb/planner/filter/in_filter.hpp"
-#include "duckdb/planner/filter/optional_filter.hpp"
-#include "duckdb/planner/filter/struct_filter.hpp"
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 
 namespace duckdb {
-
-string PostgresFilterPushdown::CreateExpression(string &column_name, vector<unique_ptr<TableFilter>> &filters,
-                                                string op, column_t column_id) {
-	vector<string> filter_entries;
-	for (auto &filter : filters) {
-		auto filter_str = TransformFilter(column_name, *filter, column_id);
-		if (!filter_str.empty()) {
-			filter_entries.push_back(std::move(filter_str));
-		}
-	}
-	if (filter_entries.empty()) {
-		return string();
-	}
-	return "(" + StringUtil::Join(filter_entries, " " + op + " ") + ")";
-}
 
 string PostgresFilterPushdown::TransformComparison(ExpressionType type) {
 	switch (type) {
@@ -63,91 +51,166 @@ string TransformLiteral(const Value &val) {
 	}
 }
 
-string PostgresFilterPushdown::TransformCTIDLiteral(const Value &constant) {
-	throw InternalException("FIXME: transform ctid literal");
+static string TransformFilterExpr(const string &column_name, const Expression &expr, column_t column_id);
+
+static string CreateConjunctionExpr(const string &column_name, const vector<unique_ptr<Expression>> &children,
+                                    const string &op, column_t column_id) {
+	vector<string> parts;
+	for (auto &child : children) {
+		auto part = TransformFilterExpr(column_name, *child, column_id);
+		if (part.empty()) {
+			return string();
+		}
+		parts.push_back(std::move(part));
+	}
+	if (parts.empty()) {
+		return string();
+	}
+	return "(" + StringUtil::Join(parts, " " + op + " ") + ")";
 }
 
-string PostgresFilterPushdown::TransformConstantFilter(string &column_name, ConstantFilter &constant_filter,
-                                                       column_t column_id) {
-	string constant_string;
-	if (IsVirtualColumn(column_id)) {
-		return "FALSE";
-	} else {
-		constant_string = TransformLiteral(constant_filter.constant);
+static bool IsDirectColumnRef(const Expression &expr) {
+	return expr.GetExpressionClass() == ExpressionClass::BOUND_REF ||
+	       expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+}
+
+static bool ExtractColumnTarget(const string &base_name, const Expression &expr, string &target_name) {
+	if (IsDirectColumnRef(expr)) {
+		target_name = base_name;
+		return true;
 	}
-	auto operator_string = TransformComparison(constant_filter.comparison_type);
-	string comparison = StringUtil::Format("%s %s %s", column_name, operator_string, constant_string);
-	if (constant_filter.constant.type().id() == LogicalTypeId::VARCHAR) {
-		comparison += " COLLATE \"C\"";
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &fn = expr.Cast<BoundFunctionExpression>();
+		if (fn.Function().GetName() == "struct_extract" && fn.GetChildren().size() == 2 &&
+		    fn.GetChildren()[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			string parent;
+			if (!ExtractColumnTarget(base_name, *fn.GetChildren()[0], parent)) {
+				return false;
+			}
+			auto child_name =
+			    KeywordHelper::WriteQuoted(fn.GetChildren()[1]->Cast<BoundConstantExpression>().GetValue().ToString(), '"');
+			target_name = "(" + parent + ")." + child_name;
+			return true;
+		}
 	}
-	return comparison;
+	return false;
+}
+
+static string TransformFilterExpr(const string &column_name, const Expression &expr, column_t column_id) {
+	if (BoundComparisonExpression::IsComparison(expr)) {
+		auto &cmp = expr.Cast<BoundFunctionExpression>();
+		auto cmp_type = cmp.GetExpressionType();
+		auto &left = BoundComparisonExpression::Left(cmp);
+		auto &right = BoundComparisonExpression::Right(cmp);
+		string target;
+		const Value *constant = nullptr;
+		if (ExtractColumnTarget(column_name, left, target) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			constant = &right.Cast<BoundConstantExpression>().GetValue();
+		} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+		           ExtractColumnTarget(column_name, right, target)) {
+			constant = &left.Cast<BoundConstantExpression>().GetValue();
+			cmp_type = FlipComparisonExpression(cmp_type);
+		} else {
+			return string();
+		}
+		if (IsVirtualColumn(column_id)) {
+			return "FALSE";
+		}
+		auto constant_string = TransformLiteral(*constant);
+		auto operator_string = PostgresFilterPushdown::TransformComparison(cmp_type);
+		string comparison = StringUtil::Format("%s %s %s", target, operator_string, constant_string);
+		if (constant->type().id() == LogicalTypeId::VARCHAR) {
+			comparison += " COLLATE \"C\"";
+		}
+		return comparison;
+	}
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		auto op = conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND ? "AND" : "OR";
+		return CreateConjunctionExpr(column_name, conj.GetChildren(), op, column_id);
+	}
+	case ExpressionClass::BOUND_OPERATOR: {
+		auto &op = expr.Cast<BoundOperatorExpression>();
+		auto &children = op.GetChildren();
+		string target;
+		if (children.empty() || !ExtractColumnTarget(column_name, *children[0], target)) {
+			return string();
+		}
+		switch (op.GetExpressionType()) {
+		case ExpressionType::OPERATOR_IS_NULL:
+			return target + " IS NULL";
+		case ExpressionType::OPERATOR_IS_NOT_NULL:
+			return target + " IS NOT NULL";
+		case ExpressionType::COMPARE_IN: {
+			string in_list;
+			for (idx_t i = 1; i < children.size(); i++) {
+				if (children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+					return string();
+				}
+				if (!in_list.empty()) {
+					in_list += ", ";
+				}
+				in_list += TransformLiteral(children[i]->Cast<BoundConstantExpression>().GetValue());
+			}
+			return target + " IN (" + in_list + ")";
+		}
+		default:
+			return string();
+		}
+	}
+	case ExpressionClass::BOUND_FUNCTION: {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (func.Function().GetName() == OptionalFilterScalarFun::NAME && func.BindInfo()) {
+			auto &data = func.BindInfo()->Cast<OptionalFilterFunctionData>();
+			return data.child_filter_expr ? TransformFilterExpr(column_name, *data.child_filter_expr, column_id)
+			                              : string();
+		}
+		if (func.Function().GetName() == SelectivityOptionalFilterScalarFun::NAME && func.BindInfo()) {
+			auto &data = func.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
+			return data.child_filter_expr ? TransformFilterExpr(column_name, *data.child_filter_expr, column_id)
+			                              : string();
+		}
+		if (func.Function().GetName() == DynamicFilterScalarFun::NAME) {
+			return string();
+		}
+		return string();
+	}
+	default:
+		return string();
+	}
 }
 
 string PostgresFilterPushdown::TransformFilter(string &column_name, TableFilter &filter, column_t column_id) {
-	switch (filter.filter_type) {
-	case TableFilterType::IS_NULL:
-		return column_name + " IS NULL";
-	case TableFilterType::IS_NOT_NULL:
-		return column_name + " IS NOT NULL";
-	case TableFilterType::CONJUNCTION_AND: {
-		auto &conjunction_filter = filter.Cast<ConjunctionAndFilter>();
-		return CreateExpression(column_name, conjunction_filter.child_filters, "AND", column_id);
-	}
-	case TableFilterType::CONJUNCTION_OR: {
-		auto &conjunction_filter = filter.Cast<ConjunctionOrFilter>();
-		return CreateExpression(column_name, conjunction_filter.child_filters, "OR", column_id);
-	}
-	case TableFilterType::CONSTANT_COMPARISON: {
-		auto &constant_filter = filter.Cast<ConstantFilter>();
-		return TransformConstantFilter(column_name, constant_filter, column_id);
-	}
-	case TableFilterType::STRUCT_EXTRACT: {
-		auto &struct_filter = filter.Cast<StructFilter>();
-		auto child_name = KeywordHelper::WriteQuoted(struct_filter.child_name, '\"');
-		auto new_name = "(" + column_name + ")." + child_name;
-		return TransformFilter(new_name, *struct_filter.child_filter, column_id);
-	}
-	case TableFilterType::OPTIONAL_FILTER: {
-		auto &optional_filter = filter.Cast<OptionalFilter>();
-		return TransformFilter(column_name, *optional_filter.child_filter, column_id);
-	}
-	case TableFilterType::IN_FILTER: {
-		auto &in_filter = filter.Cast<InFilter>();
-		string in_list;
-		for (auto &val : in_filter.values) {
-			if (!in_list.empty()) {
-				in_list += ", ";
-			}
-			in_list += TransformLiteral(val);
+	if (filter.filter_type == TableFilterType::EXPRESSION_FILTER) {
+		auto &expr_filter = filter.Cast<ExpressionFilter>();
+		if (!expr_filter.expr) {
+			return string();
 		}
-		return column_name + " IN (" + in_list + ")";
+		return TransformFilterExpr(column_name, *expr_filter.expr, column_id);
 	}
-	case TableFilterType::DYNAMIC_FILTER:
-		return string();
-	default:
-		throw InternalException("Unsupported table filter type");
-	}
+	return string();
 }
 
 string PostgresFilterPushdown::TransformFilters(const vector<column_t> &column_ids,
                                                 optional_ptr<TableFilterSet> filters, const vector<string> &names,
                                                 const vector<string> &casts) {
-	if (!filters || filters->filters.empty()) {
+	if (!filters || !filters->HasFilters()) {
 		// no filters
 		return string();
 	}
 	string result;
-	for (auto &entry : filters->filters) {
+	for (auto &entry : *filters) {
 		string column_name;
-		auto column_id = column_ids[entry.first];
+		auto column_id = column_ids[entry.GetIndex().GetIndexUnsafe()];
 		if (IsVirtualColumn(column_id)) {
 			column_name = "ctid";
 		} else {
 			column_name = KeywordHelper::WriteQuoted(names[column_id], '"');
 			column_name += casts[column_id];
 		}
-		auto &filter = *entry.second;
-		auto filter_text = TransformFilter(column_name, filter, column_id);
+		auto &filter = entry.Filter();
+		auto filter_text = TransformFilter(column_name, const_cast<TableFilter &>(filter), column_id);
 
 		if (filter_text.empty()) {
 			continue;

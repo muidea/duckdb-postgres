@@ -10,14 +10,14 @@
 namespace duckdb {
 
 PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
-    : TableCatalogEntry(catalog, schema, info) {
+    : TableCatalogEntry(catalog, schema, info), columns(std::move(info.columns)) {
 	for (idx_t c = 0; c < columns.LogicalColumnCount(); c++) {
 		auto &col = columns.GetColumnMutable(LogicalIndex(c));
 		if (col.GetType().HasAlias()) {
 			col.TypeMutable() = PostgresUtils::RemoveAlias(col.GetType());
 		}
 		postgres_types.push_back(PostgresUtils::CreateEmptyPostgresType(col.GetType()));
-		postgres_names.push_back(col.GetName());
+		postgres_names.push_back(col.GetName().GetIdentifierName());
 	}
 	approx_num_pages = 0;
 	AccountCacheMemory();
@@ -25,22 +25,27 @@ PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
 
 PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, PostgresTableInfo &info)
     : TableCatalogEntry(catalog, schema, *info.create_info), postgres_types(std::move(info.postgres_types)),
-      postgres_names(std::move(info.postgres_names)) {
+      postgres_names(std::move(info.postgres_names)), columns(std::move(info.create_info->columns)) {
 	D_ASSERT(postgres_types.size() == columns.LogicalColumnCount());
 	approx_num_pages = info.approx_num_pages;
 	AccountCacheMemory();
 }
 
+const ColumnList &PostgresTableEntry::GetColumns() const {
+	return columns;
+}
+
 void PostgresTableEntry::AccountCacheMemory() {
 	// Conservative payload estimate; nested logical type internals and general
 	// allocator overhead are not measurable here. Track this as estimated bytes.
-	cache_bytes = sizeof(*this) + name.capacity() + postgres_types.capacity() * sizeof(PostgresType) +
+	cache_bytes = sizeof(*this) + name.GetIdentifierName().capacity() +
+	              postgres_types.capacity() * sizeof(PostgresType) +
 	              postgres_names.capacity() * sizeof(string);
 	for (auto &remote_name : postgres_names) {
 		cache_bytes += remote_name.capacity();
 	}
 	for (auto &column : columns.Logical()) {
-		cache_bytes += 1024 + column.GetName().capacity() + 4 * column.GetType().ToString().size();
+		cache_bytes += 1024 + column.GetName().GetIdentifierName().capacity() + 4 * column.GetType().ToString().size();
 	}
 	cache_budget = catalog.Cast<PostgresCatalog>().GetTableCacheBudget();
 	cache_retained = cache_budget->Acquire(cache_bytes);
@@ -70,8 +75,8 @@ TableFunction PostgresTableEntry::GetScanFunction(ClientContext &context, unique
 
 	auto result = make_uniq<PostgresBindData>(context);
 
-	result->schema_name = schema.name;
-	result->table_name = name;
+	result->schema_name = schema.name.GetIdentifierName();
+	result->table_name = name.GetIdentifierName();
 	result->dsn = transaction.GetDSN();
 	result->SetCatalog(pg_catalog);
 	result->SetTable(*this);

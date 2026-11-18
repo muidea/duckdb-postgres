@@ -48,7 +48,7 @@ string EscapeConnectionString(const string &input) {
 }
 
 string AddConnectionOption(const KeyValueSecret &kv_secret, const string &name) {
-	Value input_val = kv_secret.TryGetValue(name);
+	Value input_val = kv_secret.TryGetValue(Identifier(name));
 	if (input_val.IsNull()) {
 		// not provided
 		return string();
@@ -113,13 +113,13 @@ void PostgresCatalog::Initialize(bool load_builtin) {
 
 optional_ptr<CatalogEntry> PostgresCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &postgres_transaction = PostgresTransaction::Get(transaction.GetContext(), *this);
-	auto entry = schemas.GetEntry(postgres_transaction, info.schema);
+	auto entry = schemas.GetEntry(postgres_transaction, info.SchemaName().GetIdentifierName());
 	if (entry) {
 		switch (info.on_conflict) {
 		case OnCreateConflict::REPLACE_ON_CONFLICT: {
 			DropInfo try_drop;
 			try_drop.type = CatalogType::SCHEMA_ENTRY;
-			try_drop.name = info.schema;
+			try_drop.SetName(info.SchemaName());
 			try_drop.if_not_found = OnEntryNotFound::RETURN_NULL;
 			try_drop.cascade = false;
 			schemas.DropEntry(postgres_transaction, try_drop);
@@ -129,7 +129,8 @@ optional_ptr<CatalogEntry> PostgresCatalog::CreateSchema(CatalogTransaction tran
 			return entry;
 		case OnCreateConflict::ERROR_ON_CONFLICT:
 		default:
-			throw BinderException("Failed to create schema \"%s\": schema already exists", info.schema);
+			throw BinderException("Failed to create schema \"%s\": schema already exists",
+			                      info.SchemaName().GetIdentifierName());
 		}
 	}
 	return schemas.CreateSchema(postgres_transaction, info);

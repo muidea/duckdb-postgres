@@ -67,34 +67,25 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx,
                                      TableFunctionBindInput &in,
                                      vector<LogicalType> &types,
                                      vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 2);
-}
-static unique_ptr<FunctionData> BindV3(ClientContext &ctx,
-                                       TableFunctionBindInput &in,
-                                       vector<LogicalType> &types,
-                                       vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 3);
-}
-static unique_ptr<FunctionData> BindV4(ClientContext &ctx,
-                                       TableFunctionBindInput &in,
-                                       vector<LogicalType> &types,
-                                       vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 4);
-}
-static unique_ptr<FunctionData> BindV5(ClientContext &ctx,
-                                       TableFunctionBindInput &in,
-                                       vector<LogicalType> &types,
-                                       vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 5);
-}
-static unique_ptr<FunctionData> BindScopedV2(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 2, true);
-}
-static unique_ptr<FunctionData> BindScopedV3(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 3, true);
-}
-static unique_ptr<FunctionData> BindScopedV4(ClientContext &ctx, TableFunctionBindInput &in, vector<LogicalType> &types, vector<Identifier> &names) {
-  return BindContract(ctx, in, types, names, 4, true);
+  if (in.inputs.size() != 5 || in.inputs[4].IsNull() ||
+      in.inputs[4].type().id() != LogicalTypeId::STRUCT) {
+    throw BinderException("DDL structured input is invalid");
+  }
+  const auto &st = StructType::GetChildTypes(in.inputs[4].type());
+  const auto &sf = StructValue::GetChildren(in.inputs[4]);
+  if (st.empty() || st[0].first != "contract_version" || sf[0].IsNull() ||
+      sf[0].type().id() != LogicalTypeId::INTEGER) {
+    throw BinderException("DDL contract is unavailable");
+  }
+  const int32_t contract = sf[0].GetValue<int32_t>();
+  if (contract < 2 || contract > 5) {
+    throw BinderException("DDL contract is unavailable");
+  }
+  const bool has_owner = st.size() >= 6 && st[5].first == "owner" &&
+                         !sf[5].IsNull() &&
+                         sf[5].type().id() == LogicalTypeId::VARCHAR &&
+                         !sf[5].GetValue<string>().empty();
+  return BindContract(ctx, in, types, names, contract, has_owner);
 }
 using Result = unique_ptr<PGresult, decltype(&PQclear)>;
 static Result Wrap(PGresult *r) { return Result(r, PQclear); }
@@ -322,37 +313,10 @@ void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {
     });
     loader.RegisterFunction(function);
   };
-  register_function(TableFunction("postgres_guarded_ddl_v5",
+  register_function(TableFunction("postgres_guarded_ddl",
                                   {LogicalType::VARCHAR, LogicalType::VARCHAR,
                                    LogicalType::VARCHAR, LogicalType::VARCHAR,
                                    LogicalType::ANY},
-                                  Scan, BindV5, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_scoped_v2",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, BindScopedV2, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_scoped_v3",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, BindScopedV3, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_scoped_v4",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, BindScopedV4, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_v2",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-       LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, Bind, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_v3",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-       LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, BindV3, Init));
-  register_function(TableFunction(
-      "postgres_guarded_ddl_v4",
-      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-       LogicalType::VARCHAR, LogicalType::ANY},
-      Scan, BindV4, Init));
+                                  Scan, Bind, Init));
 }
 } // namespace duckdb

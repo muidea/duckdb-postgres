@@ -77,7 +77,7 @@ void PostgresClearCacheFunction::ClearCacheOnSetting(ClientContext &context, Set
 }
 
 PostgresClearCacheFunction::PostgresClearCacheFunction(bool scoped)
-    : TableFunction(scoped ? "pg_clear_cache_scoped_v1" : "pg_clear_cache",
+    : TableFunction("pg_clear_cache",
                     scoped ? vector<LogicalType>{LogicalType::VARCHAR} : vector<LogicalType>{},
                     ClearCacheFunction, ClearCacheBind, ClearCacheInit) {
 }

@@ -467,6 +467,7 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 			scan_chunk.SetCardinality(scan_chunk.size() + 1);
 		}
 	}
+	scan_chunk.SetChildCardinality(scan_chunk.size());
 
 	for (idx_t c = 0; c < output.ColumnCount(); c++) {
 		auto col_idx = column_ids[c];
@@ -488,7 +489,7 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 			throw IOException("%s", diagnostic);
 		}
 	}
-	output.SetCardinality(scan_chunk.size());
+	output.SetChildCardinality(scan_chunk.size());
 
 	bool finished = !use_cursor && row_offset >= result->Count();
 	if (finished) {

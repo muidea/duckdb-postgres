@@ -31,6 +31,7 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 		while (!Ready()) {
 			if (!Next()) {
 				// finished this batch
+				output.SetChildCardinality(output.size());
 				return PostgresReadResult::FINISHED;
 			}
 		}
@@ -76,6 +77,7 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 		output.SetCardinality(output_offset + 1);
 	}
 	// we filled a chunk
+	output.SetChildCardinality(output.size());
 	return PostgresReadResult::HAVE_MORE_TUPLES;
 }
 

@@ -297,13 +297,13 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     deadline.reset();
     pooled.GetConnection().Close();
   }
-  out.SetCardinality(1);
   if(d.diagnostics) out.SetValue(5,0,Value(source.JSON()));
   out.SetValue(0, 0, Value(d.intent.operation));
   out.SetValue(1, 0, Value(status));
   out.SetValue(2, 0, Value(error));
   out.SetValue(3, 0, Value(stage));
   out.SetValue(4, 0, Value::BIGINT(0));
+  out.SetChildCardinality(1);
 }
 } // namespace
 void RegisterPostgresGuardedDDL(ExtensionLoader &loader) {

@@ -141,7 +141,7 @@ SinkResultType PostgresUpdate::Sink(ExecutionContext &context, DataChunk &chunk,
 		ctid_string += ")'";
 		varchar_data[r] = StringVector::AddString(ctid_vector, ctid_string);
 	}
-	gstate.insert_chunk.SetCardinality(chunk);
+	gstate.insert_chunk.SetChildCardinality(chunk.size());
 
 	auto &transaction = PostgresTransaction::Get(context.client, gstate.table.catalog);
 	auto &connection = transaction.GetConnection();
@@ -181,8 +181,8 @@ SinkFinalizeType PostgresUpdate::Finalize(Pipeline &pipeline, Event &event, Clie
 SourceResultType PostgresUpdate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                          OperatorSourceInput &input) const {
 	auto &insert_gstate = sink_state->Cast<PostgresUpdateGlobalState>();
-	chunk.SetCardinality(1);
 	chunk.SetValue(0, 0, Value::BIGINT(insert_gstate.update_count));
+	chunk.SetChildCardinality(1);
 
 	return SourceResultType::FINISHED;
 }

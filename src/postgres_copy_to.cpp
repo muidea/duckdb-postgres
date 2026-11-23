@@ -324,7 +324,7 @@ void PostgresConnection::CopyChunk(ClientContext &context, PostgresCopyState &st
 		for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
 			CastToPostgresVarchar(context, chunk.data[c], varchar_chunk.data[c], chunk.size());
 		}
-		varchar_chunk.SetCardinality(chunk.size());
+		varchar_chunk.SetChildCardinality(chunk.size());
 
 		PostgresTextWriter writer(state);
 		for (idx_t r = 0; r < chunk.size(); r++) {

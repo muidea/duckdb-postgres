@@ -83,12 +83,12 @@ static void ScanPostgresCatalogCacheStats(ClientContext &context, TableFunctionI
 		total.peak_bytes += stats.peak_bytes;
 		total.uncached_loads += stats.uncached_loads;
 	}
-	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(total.live_bytes));
 	output.SetValue(1, 0, Value::UBIGINT(total.retained_bytes));
 	output.SetValue(2, 0, Value::UBIGINT(total.live_entries));
 	output.SetValue(3, 0, Value::UBIGINT(total.peak_bytes));
 	output.SetValue(4, 0, Value::UBIGINT(total.uncached_loads));
+	output.SetChildCardinality(1);
 }
 
 class PostgresExtensionState : public ClientContextState {

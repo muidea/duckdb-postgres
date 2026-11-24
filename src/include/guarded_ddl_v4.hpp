@@ -4,11 +4,13 @@
 
 namespace duckdb {
 inline GuardedDDLIntent GuardedDDLIntent::BindV4(const vector<Value> &input,
-                                                 bool mysql) {
+                                                 bool mysql,
+                                                 bool conditional) {
   if (input.size() != 5)
     throw BinderException("DDL structured input is invalid");
   GuardedDDLIntent d;
   d.contract_version = 4;
+  d.conditional = conditional;
   d.database = Text(input[1]);
   d.schema = Text(input[2]);
   d.operation = Text(input[3]);
@@ -196,8 +198,8 @@ inline GuardedDDLIntent GuardedDDLIntent::BindV4(const vector<Value> &input,
   } else if (d.action == "drop_constraint") {
     // MySQL determines its native DROP form from the constraint catalog at
     // send.
-    d.sql = alter + " DROP CONSTRAINT " + quote(d.constraint_name) +
-            (mysql ? "" : " RESTRICT");
+    d.sql = alter + " DROP CONSTRAINT " + string(conditional && !mysql ? "IF EXISTS " : "") +
+            quote(d.constraint_name) + (mysql ? "" : " RESTRICT");
   } else if (d.action == "truncate") {
     if (d.identity_mode != "" && d.identity_mode != "continue" &&
         d.identity_mode != "restart")

@@ -3,15 +3,17 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "guarded_crud_deadline.hpp"
+#include "postgres_family_metadata.hpp"
 #include "storage/postgres_catalog.hpp"
 
 namespace duckdb {
 namespace {
 struct DDLMetadataData : TableFunctionData {
   PostgresCatalog &catalog;
-  string schema, name, kind;
+  string product, schema, name, kind;
   bool describe;
-  DDLMetadataData(PostgresCatalog &c, bool d) : catalog(c), describe(d) {}
+  DDLMetadataData(PostgresCatalog &c, string p, bool d)
+      : catalog(c), product(std::move(p)), describe(d) {}
 };
 struct DDLMetadataState : GlobalTableFunctionState {
   bool done = false;
@@ -31,8 +33,14 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx,
       ctx, Identifier(in.inputs[0].GetValue<string>()));
   if (!db || db->GetCatalog().GetCatalogType() != "postgres")
     throw BinderException("DDL metadata catalog is unavailable");
+  const auto &function_name = in.table_function.GetName().GetIdentifierName();
+  auto product = function_name.substr(0, function_name.find('_'));
+  if (product != POSTGRES_CRUD_PRODUCT && product != GREENPLUM_CRUD_PRODUCT &&
+      product != KINGBASE_CRUD_PRODUCT)
+    throw BinderException("DDL metadata product is unavailable");
   auto data = make_uniq<DDLMetadataData>(
-      db->GetCatalog().Cast<PostgresCatalog>(), in.inputs.size() == 4);
+      db->GetCatalog().Cast<PostgresCatalog>(), std::move(product),
+      in.inputs.size() == 4);
   data->schema = in.inputs[1].GetValue<string>();
   if (data->describe) {
     data->kind = in.inputs[2].GetValue<string>();
@@ -114,22 +122,56 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
     deadline = make_uniq<GuardedCRUDDeadline>(ctx, PQsocket(raw), 5);
     if (PQtransactionStatus(raw) != PQTRANS_IDLE)
       throw IOException("DDL metadata session is not idle");
-    auto identity = wrap(PQexec(raw, "SELECT pg_catalog.version()"));
+    auto identity = wrap(PQexec(
+        raw, "SELECT pg_catalog.version(),pg_catalog.current_setting('server_version_num')"));
     if (!identity || PQresultStatus(identity.get()) != PGRES_TUPLES_OK ||
         PQntuples(identity.get()) != 1)
       throw IOException("DDL metadata identity unavailable");
-    string product = PQgetvalue(identity.get(), 0, 0);
-    if (product.find("PostgreSQL ") != 0 ||
-        product.find("Greenplum") != string::npos) {
+    string ver = PQgetvalue(identity.get(), 0, 0);
+    int64_t server_num = 0;
+    try {
+      server_num = std::stoll(PQgetvalue(identity.get(), 0, 1));
+    } catch (...) {
+      server_num = 0;
+    }
+    bool is_greenplum = ver.find("Greenplum") != string::npos;
+    bool is_kingbase = ver.find("Kingbase") != string::npos;
+    if (!is_kingbase) {
+      auto mode_probe =
+          wrap(PQexec(raw, "SELECT 1 FROM pg_catalog.pg_settings WHERE name='database_mode'"));
+      if (mode_probe && PQresultStatus(mode_probe.get()) == PGRES_TUPLES_OK &&
+          PQntuples(mode_probe.get()) == 1)
+        is_kingbase = true;
+    }
+    const bool identity_ok =
+        d.product == GREENPLUM_CRUD_PRODUCT
+            ? is_greenplum
+            : (d.product == KINGBASE_CRUD_PRODUCT
+                   ? is_kingbase
+                   : (ver.find("PostgreSQL ") == 0 && !is_greenplum && !is_kingbase));
+    if (!identity_ok) {
       error = "0A000";
       throw IOException("DDL metadata adapter unavailable");
     }
     // Read-only, fixed metadata SQL. No user DDL, no resets/commits of a
     // borrowed transaction.
     stage = "source_metadata";
+    string query_sql = d.describe ? DescribeSQL : CapabilitiesSQL;
+    if (d.product != POSTGRES_CRUD_PRODUCT) {
+      query_sql = StringUtil::Replace(
+          query_sql, "'product','postgres'", "'product','" + d.product + "'");
+    }
+    if (d.describe) {
+      if (server_num < 100000) {
+        query_sql = StringUtil::Replace(query_sql, "a.attidentity", "''::pg_catalog.text");
+      }
+      if (server_num < 120000) {
+        query_sql = StringUtil::Replace(query_sql, "a.attgenerated", "''::pg_catalog.text");
+      }
+    }
     const char *args[] = {d.schema.c_str(), d.name.c_str(), d.kind.c_str()};
     auto result = wrap(
-        PQexecParams(raw, d.describe ? DescribeSQL : CapabilitiesSQL,
+        PQexecParams(raw, query_sql.c_str(),
                      d.describe ? 3 : 1, nullptr, args, nullptr, nullptr, 0));
     if (!result || PQresultStatus(result.get()) != PGRES_TUPLES_OK) {
       const char *s =
@@ -160,11 +202,14 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 } // namespace
 void RegisterPostgresDDLMetadata(ExtensionLoader &loader) {
-  loader.RegisterFunction(TableFunction(
-      "postgres_ddl_capabilities",
-      vector<LogicalType>(2, LogicalType::VARCHAR), Scan, Bind, Init));
-  loader.RegisterFunction(TableFunction(
-      "postgres_ddl_describe", vector<LogicalType>(4, LogicalType::VARCHAR),
-      Scan, Bind, Init));
+  for (auto &product :
+       {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
+    loader.RegisterFunction(TableFunction(
+        Identifier(string(product) + "_ddl_capabilities"),
+        vector<LogicalType>(2, LogicalType::VARCHAR), Scan, Bind, Init));
+    loader.RegisterFunction(TableFunction(
+        Identifier(string(product) + "_ddl_describe"),
+        vector<LogicalType>(4, LogicalType::VARCHAR), Scan, Bind, Init));
+  }
 }
 } // namespace duckdb

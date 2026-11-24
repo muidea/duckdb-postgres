@@ -227,6 +227,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	clear_cache_set.AddFunction(PostgresClearCacheFunction(true));
 	loader.RegisterFunction(clear_cache_set);
 
+	TableFunctionSet postgres_clear_cache_set("postgres_clear_cache");
+	postgres_clear_cache_set.AddFunction(PostgresClearCacheFunction(false));
+	postgres_clear_cache_set.AddFunction(PostgresClearCacheFunction(true));
+	loader.RegisterFunction(postgres_clear_cache_set);
+
 	PostgresQueryFunction query_func;
 	loader.RegisterFunction(query_func);
 

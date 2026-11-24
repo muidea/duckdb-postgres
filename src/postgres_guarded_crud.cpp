@@ -40,7 +40,7 @@ static unique_ptr<FunctionData> Bind(ClientContext &ctx, TableFunctionBindInput 
     data->product = function_name.substr(0, function_name.find('_'));
     if (data->product != POSTGRES_CRUD_PRODUCT && data->product != GREENPLUM_CRUD_PRODUCT && data->product != KINGBASE_CRUD_PRODUCT)
         throw BinderException("guarded source contract unavailable");
-    data->returning = function_name == "postgres_guarded_insert_returning";
+    data->returning = StringUtil::EndsWith(function_name, "_guarded_insert_returning");
     if (data->returning) {
         auto name=in.named_parameters.find("returning_name"), oid=in.named_parameters.find("returning_oid");
         if (name==in.named_parameters.end() || oid==in.named_parameters.end() || name->second.IsNull() || oid->second.IsNull()) throw BinderException("returned column unavailable");
@@ -192,16 +192,15 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
 }
 }
 void RegisterPostgresGuardedCRUD(ExtensionLoader &loader) {
-    TableFunction returning("postgres_guarded_insert_returning",vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
-    returning.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
-        options.Add("params", LogicalType::ANY)
-               .Add("returning_name", LogicalType::VARCHAR)
-               .Add("returning_oid", LogicalType::BIGINT)
-               .Add("source_diagnostics", LogicalType::BOOLEAN);
-    });
-    loader.RegisterFunction(returning);
-
     for (auto &product : {POSTGRES_CRUD_PRODUCT, GREENPLUM_CRUD_PRODUCT, KINGBASE_CRUD_PRODUCT}) {
+        TableFunction returning(Identifier(string(product) + "_guarded_insert_returning"),vector<LogicalType>(6,LogicalType::VARCHAR),Scan,Bind,Init);
+        returning.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+            options.Add("params", LogicalType::ANY)
+                   .Add("returning_name", LogicalType::VARCHAR)
+                   .Add("returning_oid", LogicalType::BIGINT)
+                   .Add("source_diagnostics", LogicalType::BOOLEAN);
+        });
+        loader.RegisterFunction(returning);
         TableFunction metadata(Identifier(string(product) + "_crud_metadata"),{LogicalType::VARCHAR,LogicalType::VARCHAR,LogicalType::VARCHAR},Scan,Bind,Init);
         metadata.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
             options.Add("source_diagnostics", LogicalType::BOOLEAN);

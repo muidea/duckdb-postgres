@@ -58,7 +58,7 @@ jobs:
                   'vcpkg_commit': 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6',
                   'vcpkg_triplet': 'x64-linux',
                   'extra_cmake_flags': '-DBUILD_SHELL=0 -DBUILD_UNITTESTS=0 -DPOSTGRES_GUARDED_CRUD=ON',
-                  'required_symbol': 'postgres_guarded_crud.cpp',
+                  'required_symbol': 'RegisterPostgresGuardedCRUD',
                   'require_libodbc': 'false',
               },
               'mysql_scanner': {
@@ -66,7 +66,7 @@ jobs:
                   'vcpkg_commit': '84bab45d415d22042bd0b9081aea57f362da3f35',
                   'vcpkg_triplet': 'x64-linux-release',
                   'extra_cmake_flags': '-DBUILD_SHELL=0 -DBUILD_UNITTESTS=0 -DMYSQL_GUARDED_CRUD=ON',
-                  'required_symbol': 'mysql_guarded_mutation',
+                  'required_symbol': 'RegisterMySQLGuardedCRUD',
                   'require_libodbc': 'false',
               },
               'oracle_scanner': {
@@ -74,7 +74,7 @@ jobs:
                   'vcpkg_commit': '',
                   'vcpkg_triplet': '',
                   'extra_cmake_flags': '-DBUILD_SHELL=0 -DBUILD_UNITTESTS=0 -DORACLE_GUARDED_CRUD=ON',
-                  'required_symbol': 'oracle_guarded_mutation',
+                  'required_symbol': 'RegisterOracleGuardedCRUD',
                   'require_libodbc': 'true',
               },
               'sqlserver_scanner': {
@@ -82,7 +82,7 @@ jobs:
                   'vcpkg_commit': '',
                   'vcpkg_triplet': '',
                   'extra_cmake_flags': '-DBUILD_SHELL=0 -DBUILD_UNITTESTS=0 -DSQLSERVER_GUARDED_CRUD=ON',
-                  'required_symbol': 'sqlserver_guarded_mutation',
+                  'required_symbol': 'RegisterSQLServerGuardedCRUD',
                   'require_libodbc': 'true',
               },
               'odbc_catalog_scanner': {
@@ -90,7 +90,7 @@ jobs:
                   'vcpkg_commit': '',
                   'vcpkg_triplet': '',
                   'extra_cmake_flags': '-DBUILD_SHELL=0 -DBUILD_UNITTESTS=0',
-                  'required_symbol': 'db2_guarded_mutation',
+                  'required_symbol': 'RegisterDb2GuardedCRUD',
                   'require_libodbc': 'true',
               },
           }
@@ -173,29 +173,38 @@ jobs:
           required_symbol = os.environ['REQUIRED_SYMBOL']
           require_libodbc = os.environ['REQUIRE_LIBODBC'] == 'true'
 
-          ext_bin = pathlib.Path(f'build/release/extension/{ext_name}/{ext_name}.duckdb_extension')
-          if not ext_bin.is_file():
-              ext_bin = next(pathlib.Path('build/release').rglob(f'{ext_name}.duckdb_extension'), None)
-          assert ext_bin is not None and ext_bin.is_file() and ext_bin.stat().st_size > 0, (
-              f'Missing extension binary for {ext_name} under build/release'
-          )
-          print(f'Extension binary: {ext_bin} ({ext_bin.stat().st_size} bytes)')
+          try:
+              ext_bin = pathlib.Path(f'build/release/extension/{ext_name}/{ext_name}.duckdb_extension')
+              if not ext_bin.is_file():
+                  ext_bin = next(pathlib.Path('build/release').rglob(f'{ext_name}.duckdb_extension'), None)
+              assert ext_bin is not None and ext_bin.is_file() and ext_bin.stat().st_size > 0, (
+                  f'Missing extension binary for {ext_name} under build/release'
+              )
+              print(f'Extension binary: {ext_bin} ({ext_bin.stat().st_size} bytes)')
 
-          ldd_out = subprocess.check_output(['ldd', str(ext_bin)], text=True)
-          print(ldd_out)
-          assert 'not found' not in ldd_out, f'Missing shared libraries in {ext_bin}'
-          if require_libodbc:
-              assert 'libodbc.so.2' in ldd_out, f'Expected libodbc.so.2 linkage in {ext_bin}'
+              ldd_out = subprocess.check_output(['ldd', str(ext_bin)], text=True)
+              print(ldd_out)
+              assert 'not found' not in ldd_out, f'Missing shared libraries in {ext_bin}'
+              if require_libodbc:
+                  assert 'libodbc.so.2' in ldd_out, f'Expected libodbc.so.2 linkage in {ext_bin}'
 
-          raw = ext_bin.read_bytes()
-          assert required_symbol.encode('utf-8') in raw, (
-              f'Missing guarded CRUD symbol/marker {required_symbol!r} in {ext_bin}'
-          )
+              raw = ext_bin.read_bytes()
+              nm_dyn = subprocess.run(['nm', '-D', '--defined-only', str(ext_bin)], capture_output=True, text=True, check=False).stdout
+              nm_all = subprocess.run(['nm', '--defined-only', str(ext_bin)], capture_output=True, text=True, check=False).stdout
+              symbols_text = nm_dyn + '\n' + nm_all
+              guarded_lines = [line.strip() for line in nm_dyn.splitlines() if 'Guarded' in line or 'duckdb_cpp_init' in line]
+              print('Guarded/entry symbols:', guarded_lines[:20])
+              assert required_symbol in symbols_text or required_symbol.encode('utf-8') in raw, (
+                  f'Missing guarded CRUD symbol {required_symbol!r} in {ext_bin}'
+              )
 
-          footer_tokens = [tok.decode('utf-8', errors='replace') for tok in raw[-512:].split(b'\x00') if tok]
-          print('Footer tokens:', footer_tokens)
-          assert 'v2.0.0' in footer_tokens or b'v2.0.0' in raw[-512:], f'Missing v2.0.0 footer in {ext_bin}'
-          assert 'linux_amd64' in footer_tokens or b'linux_amd64' in raw[-512:], f'Missing linux_amd64 footer in {ext_bin}'
+              footer_tokens = [tok.decode('utf-8', errors='replace') for tok in raw[-512:].split(b'\x00') if tok]
+              print('Footer tokens:', footer_tokens)
+              assert 'v2.0.0' in footer_tokens or b'v2.0.0' in raw[-512:], f'Missing v2.0.0 footer in {ext_bin}'
+              assert 'linux_amd64' in footer_tokens or b'linux_amd64' in raw[-512:], f'Missing linux_amd64 footer in {ext_bin}'
+          except AssertionError as exc:
+              print(f'::error::{exc}')
+              raise
 
           dist_dir = pathlib.Path('dist')
           dist_dir.mkdir(parents=True, exist_ok=True)

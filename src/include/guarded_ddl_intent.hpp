@@ -7,16 +7,33 @@
 // field. This initial native surface intentionally excludes conditional DDL,
 // ONLY/inheritance, implicit column attributes and non-equivalent conversions.
 namespace duckdb {
+struct DDLColumnSpec {
+  string name, type, default_kind, default_value;
+  int32_t length = 0, precision = 0, scale = 0;
+  bool not_null = false, primary_key = false;
+};
+
 struct GuardedDDLIntent {
   int32_t contract_version = 2;
+  bool conditional = false;
+  bool unified_v1 = false;
+  string product = "postgres";
   string database, schema, operation, action, name, index, owner, new_name,
       column_name, sql;
   vector<string> columns, keys;
   string default_kind, default_value, constraint_name, constraint_kind,
       check_column, check_operator, check_value, reference_schema,
-      reference_table, identity_mode;
-  vector<string> constraint_keys, reference_keys;
+      reference_table, identity_mode, primary_key_name;
+  vector<string> constraint_keys, reference_keys, primary_key_keys;
+  vector<DDLColumnSpec> column_specs;
   static GuardedDDLIntent BindV4(const vector<Value> &input, bool mysql);
+  static string ColumnTypeV6(const string &type, int32_t length,
+                               int32_t precision, int32_t scale,
+                               const string &product);
+  static GuardedDDLIntent BindV6(const vector<Value> &input,
+                                 int32_t expected_contract,
+                                 const string &product,
+                                 bool allow_optional_owner);
   static string ColumnTypeV5(const string &type, int32_t length,
                              int32_t precision, int32_t scale, bool mysql) {
     if (type == "numeric") {
@@ -266,3 +283,4 @@ struct GuardedDDLIntent {
 } // namespace duckdb
 
 #include "guarded_ddl_v4.hpp"
+#include "guarded_ddl_v6.hpp"

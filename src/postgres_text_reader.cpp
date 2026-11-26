@@ -2,6 +2,7 @@
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "postgres_scanner.hpp"
+#include "postgres_temporal_text.hpp"
 #include "query_source_error.hpp"
 
 namespace duckdb {
@@ -398,6 +399,42 @@ void PostgresTextReader::ConvertInterval(Vector &source, Vector &target, idx_t c
 	VectorOperations::Cast(context, normalized, target, count);
 }
 
+void PostgresTextReader::ConvertTemporalText(Vector &source, Vector &target, idx_t count) {
+	UnifiedVectorFormat vdata;
+	source.ToUnifiedFormat(count, vdata);
+	auto strings = UnifiedVectorFormat::GetData<string_t>(vdata);
+	bool has_bc = false;
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = vdata.sel->get_index(i);
+		if (!vdata.validity.RowIsValid(idx)) {
+			continue;
+		}
+		auto size = strings[idx].GetSize();
+		auto data = strings[idx].GetData();
+		if (size >= 4 && memcmp(data + size - 3, " BC", 3) == 0) {
+			has_bc = true;
+			break;
+		}
+	}
+	if (!has_bc) {
+		VectorOperations::Cast(context, source, target, count);
+		return;
+	}
+	const bool is_date_only = target.GetType().id() == LogicalTypeId::DATE;
+	Vector normalized(LogicalType::VARCHAR, count);
+	auto output = FlatVector::GetData<string_t>(normalized);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = vdata.sel->get_index(i);
+		if (!vdata.validity.RowIsValid(idx)) {
+			FlatVector::SetNull(normalized, i, true);
+			continue;
+		}
+		auto value = NormalizePostgresBCText(strings[idx].GetString(), is_date_only);
+		output[i] = StringVector::AddString(normalized, value);
+	}
+	VectorOperations::Cast(context, normalized, target, count);
+}
+
 void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const PostgresType &postgres_type, idx_t count) {
 	if (source.GetType().id() != LogicalTypeId::VARCHAR) {
 		throw InternalException("Source needs to be VARCHAR");
@@ -418,6 +455,11 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
 		break;
 	case LogicalTypeId::INTERVAL:
 		ConvertInterval(source, target, count);
+		break;
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		ConvertTemporalText(source, target, count);
 		break;
 	default:
 		VectorOperations::Cast(context, source, target, count);
@@ -474,7 +516,7 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
 				ctid_type.info = PostgresTypeAnnotation::CTID;
 				ConvertVector(scan_chunk.data[c], output.data[c], ctid_type, scan_chunk.size());
 			} else {
-				ConvertVector(scan_chunk.data[c], output.data[c], bind_data.postgres_types[c], scan_chunk.size());
+				ConvertVector(scan_chunk.data[c], output.data[c], bind_data.postgres_types[col_idx], scan_chunk.size());
 			}
 		} catch (const std::exception &error) {
 			auto column = col_idx < bind_data.names.size() ? bind_data.names[col_idx] : "<rowid>";

@@ -1,6 +1,7 @@
 #include "postgres_connection.hpp"
 #include "postgres_binary_writer.hpp"
 #include "postgres_source_error.hpp"
+#include "postgres_temporal_text.hpp"
 #include "postgres_text_writer.hpp"
 #include "storage/postgres_table_entry.hpp"
 
@@ -268,6 +269,24 @@ void CastGeometryToPostgres(ClientContext &context, Vector &input, Vector &resul
 	VectorOperations::Cast(context, input, result, size);
 }
 
+void CastTemporalToPostgres(ClientContext &context, Vector &input, Vector &result, idx_t size) {
+	VectorOperations::Cast(context, input, result, size);
+	auto result_data = FlatVector::GetData<string_t>(result);
+	for (idx_t r = 0; r < size; r++) {
+		if (FlatVector::IsNull(result, r)) {
+			continue;
+		}
+		auto size_str = result_data[r].GetSize();
+		auto data_str = result_data[r].GetData();
+		if (size_str >= 6 && memchr(data_str, '(', size_str) != nullptr) {
+			auto str = result_data[r].GetString();
+			if (str.find(" (BC)") != string::npos) {
+				result_data[r] = StringVector::AddString(result, NormalizeDuckDBBCToPostgres(str));
+			}
+		}
+	}
+}
+
 void CastToPostgresVarchar(ClientContext &context, Vector &input, Vector &result, idx_t size) {
 	auto &type = input.GetType();
 	switch (type.id()) {
@@ -276,6 +295,11 @@ void CastToPostgresVarchar(ClientContext &context, Vector &input, Vector &result
 		break;
 	case LogicalTypeId::STRUCT:
 		CastStructToPostgres(context, input, result, size);
+		break;
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		CastTemporalToPostgres(context, input, result, size);
 		break;
 	case LogicalTypeId::BLOB:
 		if (type.HasAlias() && StringUtil::CIEquals(type.GetAlias(), "wkb_blob")) {

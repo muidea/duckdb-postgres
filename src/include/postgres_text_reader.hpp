@@ -35,6 +35,7 @@ private:
 	void ConvertCTID(Vector &source, Vector &target, idx_t count);
 	void ConvertBlob(Vector &source, Vector &target, idx_t count);
 	void ConvertInterval(Vector &source, Vector &target, idx_t count);
+	void ConvertTemporalText(Vector &source, Vector &target, idx_t count);
 
 private:
 	ClientContext &context;

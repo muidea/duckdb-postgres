@@ -4,6 +4,7 @@
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/filter/struct_filter.hpp"
 #include "duckdb/common/enum_util.hpp"
+#include "postgres_temporal_text.hpp"
 
 namespace duckdb {
 
@@ -58,6 +59,10 @@ string TransformLiteral(const Value &val) {
 	switch (val.type().id()) {
 	case LogicalTypeId::BLOB:
 		return TransformBlob(StringValue::Get(val));
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return KeywordHelper::WriteQuoted(NormalizeDuckDBBCToPostgres(val.ToString()));
 	default:
 		return KeywordHelper::WriteQuoted(val.ToString());
 	}

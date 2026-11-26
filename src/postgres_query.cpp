@@ -5,6 +5,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "postgres_scanner.hpp"
+#include "postgres_temporal_text.hpp"
 #include "storage/postgres_catalog.hpp"
 #include "storage/postgres_schema_entry.hpp"
 #include "storage/postgres_transaction.hpp"
@@ -86,7 +87,7 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 		          ")";
 	}
 	auto metadata = con.Query("SELECT f.i, t.typname, n.nspname, coalesce(a.attndims,0), CASE WHEN "
-	                          "t.typelem<>0 AND t.typlen=-1 THEN 1 ELSE 0 END "
+	                          "t.typelem<>0 AND t.typlen=-1 THEN 1 ELSE 0 END, t.typlen, t.typelem "
 	                          "FROM (VALUES " +
 	                          fields +
 	                          ") AS f(i,type_oid,relation_oid,attribute_number) "
@@ -105,10 +106,16 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
 		type_data.type_modifier = PQfmod(describe_prepared, c);
 		type_data.array_dimensions = metadata->GetInt64(c, 3);
 		auto type_schema_name = metadata->GetString(c, 2);
+		type_data.type_schema = type_schema_name;
+		type_data.type_oid = postgres_type.oid;
+		type_data.type_len = static_cast<int16_t>(metadata->GetInt64(c, 5));
+		type_data.elem_oid = static_cast<uint32_t>(metadata->GetInt64(c, 6));
 		optional_ptr<PostgresSchemaEntry> type_schema;
 		// Built-in types need no schema load. Custom types use the same catalog
 		// resolver as attached scans (including enums, domains and composites).
-		if (type_schema_name != "pg_catalog") {
+		if (type_schema_name != "pg_catalog" && !PostgresUtils::IsKingbaseOracleDate(type_data) &&
+		    !IsKingbaseOracleDateArrayMetadata(type_data.type_name, type_data.type_schema, type_data.type_oid,
+		                                       type_data.elem_oid)) {
 			auto schema = pg_catalog.GetSchema(context, type_schema_name, OnEntryNotFound::RETURN_NULL);
 			if (schema) {
 				type_schema = &schema->Cast<PostgresSchemaEntry>();

@@ -23,17 +23,20 @@ string PostgresTableSet::GetInitializeQuery(const string &schema, const string &
 SELECT pg_namespace.oid AS namespace_id, relname, relpages, attname,
     pg_type.typname type_name, atttypmod type_modifier, pg_attribute.attndims ndim,
     attnum, pg_attribute.attnotnull AS notnull, NULL constraint_id,
-    NULL constraint_type, NULL constraint_key
+    NULL constraint_type, NULL constraint_key, type_ns.nspname AS type_schema,
+    pg_type.oid AS type_oid, pg_type.typlen AS type_len, pg_type.typelem AS elem_oid
 FROM pg_class
 JOIN pg_namespace ON relnamespace = pg_namespace.oid
 JOIN pg_attribute ON pg_class.oid=pg_attribute.attrelid
 JOIN pg_type ON atttypid=pg_type.oid
+JOIN pg_namespace type_ns ON pg_type.typnamespace = type_ns.oid
 WHERE attnum > 0 AND NOT pg_attribute.attisdropped AND relkind IN ('r', 'v', 'm', 'f', 'p') ${CONDITION}
 UNION ALL
 SELECT pg_namespace.oid AS namespace_id, relname, NULL relpages, NULL attname, NULL type_name,
     NULL type_modifier, NULL ndim, NULL attnum, NULL AS notnull,
     pg_constraint.oid AS constraint_id, contype AS constraint_type,
-    conkey AS constraint_key
+    conkey AS constraint_key, NULL AS type_schema, NULL AS type_oid, NULL AS type_len,
+    NULL AS elem_oid
 FROM pg_class
 JOIN pg_namespace ON relnamespace = pg_namespace.oid
 JOIN pg_constraint ON (pg_class.oid=pg_constraint.conrelid)
@@ -59,6 +62,10 @@ void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
 	type_info.type_name = result.GetString(row, column_index + 1);
 	type_info.type_modifier = result.GetInt64(row, column_index + 2);
 	type_info.array_dimensions = result.GetInt64(row, column_index + 3);
+	type_info.type_schema = result.GetString(row, 12);
+	type_info.type_oid = static_cast<uint32_t>(result.GetInt64(row, 13));
+	type_info.type_len = static_cast<int16_t>(result.GetInt64(row, 14));
+	type_info.elem_oid = static_cast<uint32_t>(result.GetInt64(row, 15));
 	bool is_not_null = result.GetBool(row, column_index + 5);
 	string default_value;
 

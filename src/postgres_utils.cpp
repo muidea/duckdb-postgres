@@ -1,11 +1,39 @@
 #include "postgres_utils.hpp"
 #include "storage/postgres_schema_entry.hpp"
 #include "storage/postgres_transaction.hpp"
+#include "postgres_temporal_text.hpp"
 #include "postgres_type_oids.hpp"
 
 namespace duckdb {
 
 static void PGNoticeProcessor(void *arg, const char *message) {
+}
+
+bool PostgresUtils::ConfigureSessionTemporalSettings(PGconn *conn, string *error_message) {
+	if (!conn || PQstatus(conn) != CONNECTION_OK) {
+		if (error_message) {
+			*error_message = conn ? string(PQerrorMessage(conn)) : "PostgreSQL connection is not open";
+		}
+		return false;
+	}
+	for (const char *stmt : {"SET TIME ZONE 'UTC'", "SET DateStyle = 'ISO, YMD'"}) {
+		PGresult *res = PQexec(conn, stmt);
+		if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
+			if (error_message) {
+				*error_message = res ? string(PQresultErrorMessage(res)) : string(PQerrorMessage(conn));
+			}
+			if (res) {
+				PQclear(res);
+			}
+			return false;
+		}
+		PQclear(res);
+	}
+	return true;
+}
+
+bool PostgresUtils::IsKingbaseOracleDate(const PostgresTypeData &input) {
+	return IsKingbaseOracleDateMetadata(input.type_name, input.type_schema, input.type_oid, input.type_len);
 }
 
 PGconn *PostgresUtils::PGConnect(const string &dsn) {
@@ -20,6 +48,11 @@ PGconn *PostgresUtils::PGConnect(const string &dsn) {
 		throw IOException("Unable to connect to Postgres at %s: %s", dsn, error_message);
 	}
 	PQsetNoticeProcessor(conn, PGNoticeProcessor, nullptr);
+	string temporal_error;
+	if (!ConfigureSessionTemporalSettings(conn, &temporal_error)) {
+		PQfinish(conn);
+		throw IOException("Unable to configure Postgres session temporal settings at %s: %s", dsn, temporal_error);
+	}
 	return conn;
 }
 
@@ -115,6 +148,14 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 		PostgresTypeData child_type_info;
 		child_type_info.type_name = pgtypename.substr(1);
 		child_type_info.type_modifier = type_info.type_modifier;
+		child_type_info.type_schema = type_info.type_schema;
+		if (IsKingbaseOracleDateArrayMetadata(pgtypename, type_info.type_schema, type_info.type_oid,
+		                                     type_info.elem_oid)) {
+			child_type_info.type_oid = KINGBASE_SYSDATEOID;
+			child_type_info.type_len = 8;
+		} else {
+			child_type_info.type_oid = type_info.elem_oid;
+		}
 		PostgresType child_pg_type;
 		auto child_type = PostgresUtils::TypeToLogicalType(transaction, schema, child_type_info, child_pg_type);
 		// construct the child type based on the number of dimensions
@@ -167,6 +208,10 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
 	} else if (pgtypename == "geometry") {
 		return GetGeometryType();
 	} else if (pgtypename == "date") {
+		if (IsKingbaseOracleDate(type_info)) {
+			postgres_type.oid = type_info.type_oid ? type_info.type_oid : KINGBASE_SYSDATEOID;
+			return LogicalType::TIMESTAMP;
+		}
 		return LogicalType::DATE;
 	} else if (pgtypename == "bytea") {
 		return LogicalType::BLOB;

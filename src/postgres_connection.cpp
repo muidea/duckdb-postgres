@@ -167,7 +167,8 @@ bool PostgresConnection::Reset() {
 	auto conn = GetConn();
 	if (PQstatus(conn) != CONNECTION_OK) {
 		PQreset(conn);
-		return PQstatus(conn) == CONNECTION_OK && PQtransactionStatus(conn) == PQTRANS_IDLE;
+		return PQstatus(conn) == CONNECTION_OK && PQtransactionStatus(conn) == PQTRANS_IDLE &&
+		       PostgresUtils::ConfigureSessionTemporalSettings(conn);
 	}
 
 	auto transaction_status = PQtransactionStatus(conn);
@@ -179,10 +180,12 @@ bool PostgresConnection::Reset() {
 	}
 	if (transaction_status != PQTRANS_IDLE) {
 		PQreset(conn);
-		return PQstatus(conn) == CONNECTION_OK && PQtransactionStatus(conn) == PQTRANS_IDLE;
+		if (PQstatus(conn) != CONNECTION_OK || PQtransactionStatus(conn) != PQTRANS_IDLE) {
+			return false;
+		}
 	}
 
-	return true;
+	return PostgresUtils::ConfigureSessionTemporalSettings(conn);
 }
 
 vector<IndexInfo> PostgresConnection::GetIndexInfo(const string &table_name) {

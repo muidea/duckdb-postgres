@@ -283,7 +283,8 @@ static void Scan(ClientContext &ctx, TableFunctionInput &in, DataChunk &out) {
         timeout +
         "'; "
         "SET LOCAL lock_timeout='5s'; SET LOCAL "
-        "standard_conforming_strings=on; SET LOCAL client_encoding='UTF8'";
+        "standard_conforming_strings=on; SET LOCAL client_encoding='UTF8'; "
+        "SET LOCAL timezone='UTC'; SET LOCAL datestyle='ISO,YMD'";
     auto settings = Wrap(PQexec(raw, settingsSQL.c_str()));
     if (!OK(settings.get())) {
       source=SourceError(settings.get(), d.product); error = ErrorState(settings.get());

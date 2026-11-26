@@ -87,12 +87,14 @@ void PostgresTypeSet::InitializeEnums(PostgresTransaction &transaction, Postgres
 
 string PostgresTypeSet::GetInitializeCompositesQuery(const string &schema) {
 	string base_query = R"(
-SELECT n.oid, t.typrelid AS id, t.typname as type, pg_attribute.attname, sub_type.typname
+SELECT n.oid, t.typrelid AS id, t.typname as type, pg_attribute.attname, sub_type.typname,
+    sub_ns.nspname, sub_type.oid, sub_type.typlen, sub_type.typelem
 FROM pg_type t
 JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
 JOIN pg_class ON pg_class.oid = t.typrelid
 JOIN pg_attribute ON attrelid=t.typrelid
 JOIN pg_type sub_type ON (pg_attribute.atttypid=sub_type.oid)
+JOIN pg_catalog.pg_namespace sub_ns ON sub_ns.oid = sub_type.typnamespace
 WHERE pg_class.relkind = 'c'
 AND t.typtype='c'
 ${CONDITION}
@@ -117,6 +119,10 @@ void PostgresTypeSet::CreateCompositeType(PostgresTransaction &transaction, Post
 		auto type_name = result.GetString(row, 3);
 		PostgresTypeData type_data;
 		type_data.type_name = result.GetString(row, 4);
+		type_data.type_schema = result.GetString(row, 5);
+		type_data.type_oid = static_cast<uint32_t>(result.GetInt64(row, 6));
+		type_data.type_len = static_cast<int16_t>(result.GetInt64(row, 7));
+		type_data.elem_oid = static_cast<uint32_t>(result.GetInt64(row, 8));
 		PostgresType child_type;
 		child_types.push_back(
 		    make_pair(Identifier(type_name), PostgresUtils::TypeToLogicalType(&transaction, &schema, type_data, child_type)));

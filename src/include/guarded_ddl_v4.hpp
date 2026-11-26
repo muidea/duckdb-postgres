@@ -5,12 +5,14 @@
 namespace duckdb {
 inline GuardedDDLIntent GuardedDDLIntent::BindV4(const vector<Value> &input,
                                                  bool mysql,
-                                                 bool conditional) {
+                                                 bool conditional,
+                                                 const string &product) {
   if (input.size() != 5)
     throw BinderException("DDL structured input is invalid");
   GuardedDDLIntent d;
   d.contract_version = 4;
   d.conditional = conditional;
+  d.product = mysql ? "mysql" : product;
   d.database = Text(input[1]);
   d.schema = Text(input[2]);
   d.operation = Text(input[3]);
@@ -128,12 +130,18 @@ inline GuardedDDLIntent GuardedDDLIntent::BindV4(const vector<Value> &input,
     throw BinderException("DDL constraint name is invalid");
   if (d.action != "truncate" && !d.identity_mode.empty())
     throw BinderException("DDL identity field is invalid");
+  if (conditional && d.action != "drop_constraint")
+    throw BinderException("DDL IF [NOT] EXISTS is unsupported for this action");
   if (d.action == "set_default") {
     string value;
     if (d.default_kind == "null" && d.default_value.empty())
       value = "NULL";
     else if (d.default_kind == "integer" && integer(d.default_value))
       value = d.default_value;
+    else if (d.default_kind == "boolean" &&
+             (d.default_value == "true" || d.default_value == "false"))
+      value = mysql ? (d.default_value == "true" ? "1" : "0")
+                    : (d.default_value == "true" ? "TRUE" : "FALSE");
     else if (d.default_kind == "string" && d.default_value.size() <= 4096 &&
              d.default_value.find('\0') == string::npos)
       value = literal(d.default_value);

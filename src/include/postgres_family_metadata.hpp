@@ -36,7 +36,8 @@ static string PostgresFamilyMetadataSQL(const string &product) {
 		sql = StringUtil::Replace(sql, "'database', pg_catalog.current_database(),",
 		    string("'product','") + KINGBASE_CRUD_PRODUCT + "','product_facts',pg_catalog.json_build_object("
 		    "'encoding',pg_catalog.current_setting('server_encoding'),"
-		    "'mode',pg_catalog.current_setting('database_mode'))::pg_catalog.text,"
+		    "'mode',pg_catalog.current_setting('database_mode'),"
+		    "'empty_str_is_null',coalesce(pg_catalog.current_setting('ora_input_emptystr_isnull',true),''))::pg_catalog.text,"
 		    "'database',pg_catalog.current_database(),");
 	}
 	return sql;

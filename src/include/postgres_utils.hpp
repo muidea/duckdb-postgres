@@ -19,7 +19,11 @@ class PostgresTransaction;
 struct PostgresTypeData {
 	int64_t type_modifier = 0;
 	string type_name;
+	string type_schema;
 	idx_t array_dimensions = 0;
+	uint32_t type_oid = 0;
+	int16_t type_len = 0;
+	uint32_t elem_oid = 0;
 };
 
 enum class PostgresTypeAnnotation {
@@ -59,6 +63,8 @@ enum class PostgresIsolationLevel { READ_COMMITTED, REPEATABLE_READ, SERIALIZABL
 class PostgresUtils {
 public:
 	static PGconn *PGConnect(const string &dsn);
+	static bool ConfigureSessionTemporalSettings(PGconn *conn, string *error_message = nullptr);
+	static bool IsKingbaseOracleDate(const PostgresTypeData &input);
 
 	static LogicalType ToPostgresType(const LogicalType &input);
 	static LogicalType TypeToLogicalType(optional_ptr<PostgresTransaction> transaction,

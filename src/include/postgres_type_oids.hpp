@@ -190,3 +190,7 @@
 #define DATEMULTIRANGEARRAYOID          6155
 #define INT8MULTIRANGEARRAYOID          6157
 #define CSTRINGARRAYOID                 1263
+
+// KingbaseES Oracle-mode sys.date (8-byte timestamp_send) and its array sys._date
+#define KINGBASE_SYSDATEOID             8020
+#define KINGBASE_SYSDATEARRAYOID        8021

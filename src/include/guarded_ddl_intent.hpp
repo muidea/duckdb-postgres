@@ -7,19 +7,28 @@
 // field. This initial native surface intentionally excludes conditional DDL,
 // ONLY/inheritance, implicit column attributes and non-equivalent conversions.
 namespace duckdb {
+struct DDLColumnSpec {
+  string name, type, native, default_kind, default_value;
+  int32_t length = 0, precision = 0, scale = 0;
+  bool not_null = false, primary_key = false, unique = false;
+};
+
 struct GuardedDDLIntent {
   int32_t contract_version = 2;
   bool conditional = false;
+  bool has_foreign_key = false;
+  string product = "postgres";
   string database, schema, operation, action, name, index, owner, new_name,
       column_name, query_sql, sql;
   vector<string> columns, constraints, keys;
-  vector<pair<string, string>> column_specs;
+  vector<DDLColumnSpec> column_specs;
   string default_kind, default_value, constraint_name, constraint_kind,
       check_column, check_operator, check_value, reference_schema,
       reference_table, identity_mode;
-  vector<string> constraint_keys, reference_keys;
+  vector<string> constraint_keys, reference_keys, primary_key_keys;
   static GuardedDDLIntent BindV4(const vector<Value> &input, bool mysql,
-                                 bool conditional = false);
+                                 bool conditional = false,
+                                 const string &product = "postgres");
   static bool SimpleIntLiteral(const string &s) {
     if (s.empty() || s.size() > 38)
       return false;
@@ -47,7 +56,8 @@ struct GuardedDDLIntent {
     throw BinderException("DDL default literal is invalid");
   }
   static string ColumnTypeV5(const string &type, int32_t length,
-                             int32_t precision, int32_t scale, bool mysql) {
+                             int32_t precision, int32_t scale, bool mysql,
+                             const string &product = "postgres") {
     if (type == "numeric") {
       if (length || precision < 1 || precision > (mysql ? 65 : 38) ||
           scale < 0 || scale > precision || (mysql && scale > 30))
@@ -74,8 +84,13 @@ struct GuardedDDLIntent {
       return "VARCHAR(" + std::to_string(length) + ")";
     if (length)
       throw BinderException("DDL unexpected length");
+    if (type == "date") {
+      // KingbaseES oracle mode resolves unqualified DATE to sys.date (OID 8020).
+      // Always target PG-standard pg_catalog.date (OID 1082).
+      return (!mysql && product == "kingbasees") ? "pg_catalog.date" : "date";
+    }
     if (type == "smallint" || type == "integer" || type == "bigint" ||
-        type == "text" || type == "date")
+        type == "text")
       return type;
     if (type == "real")
       return mysql ? "FLOAT" : "REAL";
@@ -96,14 +111,16 @@ struct GuardedDDLIntent {
   }
   static GuardedDDLIntent Bind(const vector<Value> &input, bool mysql,
                                int32_t contract = 2,
-                               bool conditional = false) {
+                               bool conditional = false,
+                               const string &product = "postgres") {
     if (contract == 4)
-      return BindV4(input, mysql, conditional);
+      return BindV4(input, mysql, conditional, product);
     if (input.size() != 5)
       throw BinderException("DDL structured input is invalid");
     GuardedDDLIntent d;
     d.contract_version = contract;
     d.conditional = conditional;
+    d.product = mysql ? "mysql" : product;
     d.database = Text(input[1]);
     d.schema = Text(input[2]);
     d.operation = Text(input[3]);
@@ -176,6 +193,12 @@ struct GuardedDDLIntent {
         : contract == 5    ? !v5_action
                            : extended_action != (contract == 3))
       throw BinderException("DDL action requires a different contract");
+    if (d.conditional && d.action != "create_table" && d.action != "drop_table" &&
+        d.action != "add_column" && d.action != "drop_column" &&
+        d.action != "create_index" && d.action != "create_unique_index" &&
+        d.action != "drop_index" && d.action != "create_schema" &&
+        d.action != "drop_schema")
+      throw BinderException("DDL IF [NOT] EXISTS is unsupported for this action");
     if (fields[6 + offset].type().id() != LogicalTypeId::LIST ||
         fields[7 + offset].type().id() != LogicalTypeId::LIST)
       throw BinderException("DDL payload is invalid");
@@ -187,6 +210,8 @@ struct GuardedDDLIntent {
       return KeywordHelper::WriteQuoted(s, mysql ? '`' : '"');
     };
     vector<string> seen;
+    vector<string> inline_pk_cols;
+    vector<string> table_pk_cols;
     for (auto &col : cols) {
       if (col.IsNull() || col.type().id() != LogicalTypeId::STRUCT)
         throw BinderException("DDL column definition is invalid");
@@ -202,6 +227,10 @@ struct GuardedDDLIntent {
         throw BinderException("DDL duplicate column is invalid");
       seen.push_back(n);
       auto length = cv[2].GetValue<int32_t>();
+      DDLColumnSpec spec;
+      spec.name = n;
+      spec.type = type;
+      spec.length = length;
       string native, extra_col;
       if (contract == 5 || contract == 6) {
         if (ct[3].first != "precision" || ct[4].first != "scale" ||
@@ -209,8 +238,10 @@ struct GuardedDDLIntent {
             cv[3].type().id() != LogicalTypeId::INTEGER ||
             cv[4].type().id() != LogicalTypeId::INTEGER)
           throw BinderException("DDL numeric/time modifiers are invalid");
-        native = ColumnTypeV5(type, length, cv[3].GetValue<int32_t>(),
-                              cv[4].GetValue<int32_t>(), mysql);
+        spec.precision = cv[3].GetValue<int32_t>();
+        spec.scale = cv[4].GetValue<int32_t>();
+        native = ColumnTypeV5(type, length, spec.precision, spec.scale, mysql,
+                              d.product);
       } else if (type == "smallint" || type == "integer" || type == "bigint") {
         if (length)
           throw BinderException("DDL column length is invalid");
@@ -223,6 +254,7 @@ struct GuardedDDLIntent {
       } else {
         throw BinderException("DDL column type is unsupported");
       }
+      spec.native = native;
       if (contract == 6) {
         if (ct[5].first != "not_null" || ct[6].first != "default_kind" ||
             ct[7].first != "default_value" || ct[8].first != "primary_key" ||
@@ -231,20 +263,27 @@ struct GuardedDDLIntent {
             cv[8].type().id() != LogicalTypeId::BOOLEAN ||
             cv[9].type().id() != LogicalTypeId::BOOLEAN)
           throw BinderException("DDL v6 column modifiers are invalid");
-        if (cv[5].GetValue<bool>())
+        spec.not_null = cv[5].GetValue<bool>();
+        if (spec.not_null)
           extra_col += " NOT NULL";
-        string dk = Text(cv[6]), dv = Text(cv[7]);
-        if (!dk.empty())
-          extra_col += " DEFAULT " + DefaultLiteralSQL(dk, dv, mysql);
-        else if (!dv.empty())
+        spec.default_kind = Text(cv[6]);
+        spec.default_value = Text(cv[7]);
+        if (!spec.default_kind.empty())
+          extra_col += " DEFAULT " + DefaultLiteralSQL(spec.default_kind,
+                                                       spec.default_value, mysql);
+        else if (!spec.default_value.empty())
           throw BinderException("DDL column default kind is missing");
-        if (cv[8].GetValue<bool>())
+        spec.primary_key = cv[8].GetValue<bool>();
+        if (spec.primary_key) {
           extra_col += " PRIMARY KEY";
-        if (cv[9].GetValue<bool>())
+          inline_pk_cols.push_back(n);
+        }
+        spec.unique = cv[9].GetValue<bool>();
+        if (spec.unique)
           extra_col += " UNIQUE";
       }
       d.columns.push_back(quote(n) + " " + native + extra_col);
-      d.column_specs.emplace_back(n, native);
+      d.column_specs.push_back(std::move(spec));
     }
     if (contract == 6) {
       if (fields[9].type().id() != LogicalTypeId::LIST)
@@ -268,7 +307,7 @@ struct GuardedDDLIntent {
         string cname = Text(cv[0]), kind = Text(cv[1]);
         if (!cname.empty() && !Name(cname))
           throw BinderException("DDL constraint name is invalid");
-        auto keys_sql = [&](const Value &lv) {
+        auto keys_sql = [&](const Value &lv, vector<string> *raw_out = nullptr) {
           if (lv.type().id() != LogicalTypeId::LIST)
             throw BinderException("DDL constraint keys are invalid");
           auto &items = ListValue::GetChildren(lv);
@@ -279,16 +318,22 @@ struct GuardedDDLIntent {
             auto kn = Text(item);
             if (!Name(kn))
               throw BinderException("DDL constraint key name is invalid");
+            if (raw_out)
+              raw_out->push_back(kn);
             out.push_back(quote(kn));
           }
           return "(" + StringUtil::Join(out, ",") + ")";
         };
         string def;
         if (kind == "primary_key") {
-          def = "PRIMARY KEY " + keys_sql(cv[2]);
+          vector<string> pk_cols;
+          def = "PRIMARY KEY " + keys_sql(cv[2], &pk_cols);
+          if (table_pk_cols.empty())
+            table_pk_cols = std::move(pk_cols);
         } else if (kind == "unique") {
           def = "UNIQUE " + keys_sql(cv[2]);
         } else if (kind == "foreign_key") {
+          d.has_foreign_key = true;
           string rs = Text(cv[3]), rt = Text(cv[4]);
           if (rs != d.schema || !Name(rt))
             throw BinderException("DDL foreign key target is invalid");
@@ -315,6 +360,8 @@ struct GuardedDDLIntent {
           d.constraints.push_back(def);
       }
     }
+    d.primary_key_keys =
+        !table_pk_cols.empty() ? std::move(table_pk_cols) : std::move(inline_pk_cols);
     for (auto &key : keys) {
       string n = Text(key);
       if (!Name(n) ||
@@ -331,8 +378,19 @@ struct GuardedDDLIntent {
       defs.insert(defs.end(), d.constraints.begin(), d.constraints.end());
       d.sql = "CREATE TABLE " + string(conditional ? "IF NOT EXISTS " : "") +
               target + " (" + StringUtil::Join(defs, ",") + ")";
-      if (mysql)
+      if (mysql) {
         d.sql += " ENGINE=InnoDB";
+      } else if (d.product == "greenplum") {
+        vector<string> dist_cols = d.primary_key_keys;
+        if (dist_cols.empty()) {
+          dist_cols.push_back(d.column_specs[0].name);
+        }
+        vector<string> dist_sql;
+        for (const auto &col : dist_cols) {
+          dist_sql.push_back(quote(col));
+        }
+        d.sql += " DISTRIBUTED BY (" + StringUtil::Join(dist_sql, ",") + ")";
+      }
     } else if (d.action == "drop_table") {
       if (!d.columns.empty() || !d.keys.empty() || !d.index.empty() ||
           !d.owner.empty())
@@ -412,12 +470,12 @@ struct GuardedDDLIntent {
       if (d.columns.size() != 1 || d.column_specs.size() != 1 ||
           !d.keys.empty() || !d.index.empty() || !d.owner.empty() ||
           !d.new_name.empty() || d.column_name.empty() ||
-          d.column_specs[0].first != d.column_name)
+          d.column_specs[0].name != d.column_name)
         throw BinderException("DDL alter column type options are invalid");
       d.sql = mysql
                   ? "ALTER TABLE " + target + " MODIFY COLUMN " + d.columns[0]
                   : "ALTER TABLE ONLY " + target + " ALTER COLUMN " +
-                        quote(d.column_name) + " TYPE " + d.column_specs[0].second;
+                        quote(d.column_name) + " TYPE " + d.column_specs[0].native;
     } else if (d.action == "create_schema") {
       if (!d.columns.empty() || !d.keys.empty() || !d.index.empty() ||
           !d.owner.empty() || !d.new_name.empty() || !d.column_name.empty() ||
